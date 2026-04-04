@@ -91,8 +91,8 @@ MLX_MODEL_MAP = {
 }
 
 APP_VERSION  = "1.0.0"
-GITHUB_REPO  = "nocodeuser1/myscriber"  # GitHub repo for update checks
-UPDATE_URL   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_REPO  = "nocodeuser1/myscriber"  # GitHub repo (private)
+UPDATE_URL   = "https://gist.githubusercontent.com/nocodeuser1/19ae5cbd0057f2f7a3b04ac2f667118f/raw/version.json"
 
 CONFIG_PATH  = Path.home() / ".myscriber" / "config.json"
 ASSETS_DIR   = Path(__file__).parent.parent / "assets"
@@ -849,16 +849,22 @@ class MyScriber(rumps.App):
         self._last_vol_level = -1
 
         # Show blue mic at level 0 (outline only = "listening, no sound yet")
-        self.title = ""  # clear text title
+        # All AppKit/UI ops must happen on main thread
         try:
             from PyObjCTools import AppHelper
-            AppHelper.callAfter(lambda: self._set_volume_icon(0))
+            def _start_ui():
+                self.title = ""
+                self._set_volume_icon(0)
+            AppHelper.callAfter(_start_ui)
         except Exception:
             pass
 
-        # If overlay is open, update hint to show recording state
-        if self._overlay_panel:
-            self._overlay_set_recording(True)
+        # If overlay is open, update hint to show recording state (main thread)
+        try:
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(lambda: self._overlay_set_recording(True) if self._overlay_panel else None)
+        except Exception:
+            pass
 
         app = self
         try:
@@ -905,23 +911,26 @@ class MyScriber(rumps.App):
             self.stream = None
 
         # Restore normal template icon and show "transcribing" indicator
+        # IMPORTANT: All AppKit/UI operations must happen on the main thread
+        # to avoid segfaults. Never set self.title or access overlay panel
+        # from a background thread.
         try:
             from PyObjCTools import AppHelper
-            AppHelper.callAfter(self._restore_template_icon)
+            def _ui_cleanup():
+                self._restore_template_icon()
+                self.title = ""
+                if self._overlay_panel:
+                    self._overlay_set_recording(False)
+            AppHelper.callAfter(_ui_cleanup)
         except Exception:
             pass
-        self.title = ""
-
-        # If overlay is open, update hint back to idle
-        if self._overlay_panel:
-            self._overlay_set_recording(False)
 
         def _transcribe():
             self._transcribing = True
             tmp = None
             try:
                 if not self.audio_frames:
-                    self.title = ""
+                    self._set_title("")
                     return
 
                 audio = np.concatenate(self.audio_frames, axis=0).flatten()
@@ -1046,11 +1055,14 @@ class MyScriber(rumps.App):
         2. AXSubrole (AXContentEditable — used by Electron apps like Claude)
         3. AXSelectedText attribute existence (definitive text-editing marker)
         4. AXValue settable (writable means editable)
+
+        IMPORTANT: All CoreFoundation objects (CFString, AXUIElement) obtained
+        via Create/Copy functions must be CFRelease'd to avoid memory leaks
+        that cause segfaults over time.
         """
         try:
             import ctypes
             from AppKit import NSWorkspace
-            import objc
 
             # Load HIServices (contains AX* functions)
             hi = ctypes.cdll.LoadLibrary(
@@ -1078,6 +1090,8 @@ class MyScriber(rumps.App):
             cf.CFStringCreateWithCString.argtypes = [
                 ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32,
             ]
+            cf.CFRelease.restype = None
+            cf.CFRelease.argtypes = [ctypes.c_void_p]
             kCFStringEncodingUTF8 = 0x08000100
 
             cf.CFGetTypeID.restype = ctypes.c_ulong
@@ -1086,8 +1100,29 @@ class MyScriber(rumps.App):
             cf.CFStringGetCStringPtr.restype = ctypes.c_char_p
             cf.CFStringGetCStringPtr.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
+            # Track all CF objects for cleanup
+            _cf_owned = []
+
             def _cfstr(s):
-                return cf.CFStringCreateWithCString(None, s.encode(), kCFStringEncodingUTF8)
+                ptr = cf.CFStringCreateWithCString(None, s.encode(), kCFStringEncodingUTF8)
+                if ptr:
+                    _cf_owned.append(ptr)
+                return ptr
+
+            def _track(ptr):
+                """Track a CF object returned by a Copy function for later release."""
+                if ptr:
+                    _cf_owned.append(ptr)
+                return ptr
+
+            def _cleanup():
+                """Release all tracked CF objects."""
+                for ptr in _cf_owned:
+                    try:
+                        cf.CFRelease(ptr)
+                    except Exception:
+                        pass
+                _cf_owned.clear()
 
             def _read_cfstr(ptr):
                 if not ptr:
@@ -1095,147 +1130,160 @@ class MyScriber(rumps.App):
                 p = cf.CFStringGetCStringPtr(ptr, kCFStringEncodingUTF8)
                 return p.decode() if p else None
 
-            # Get front application PID
-            front_app = NSWorkspace.sharedWorkspace().frontmostApplication()
-            if not front_app:
-                return False
-            pid = front_app.processIdentifier()
-
-            app_ref = hi.AXUIElementCreateApplication(pid)
-            if not app_ref:
-                return False
-
-            # Get focused element
-            focused = ctypes.c_void_p()
-            attr_focus = _cfstr("AXFocusedUIElement")
-            err = hi.AXUIElementCopyAttributeValue(app_ref, attr_focus, ctypes.byref(focused))
-            if err != 0 or not focused.value:
-                return False
-
-            # ── Check 1: AXRole ──
-            role_ptr = ctypes.c_void_p()
-            attr_role = _cfstr("AXRole")
-            err = hi.AXUIElementCopyAttributeValue(focused, attr_role, ctypes.byref(role_ptr))
-            role = _read_cfstr(role_ptr.value) if (err == 0 and role_ptr.value) else None
-
-            editable_roles = {
-                "AXTextField", "AXTextArea", "AXComboBox",
-                "AXSearchField", "AXWebArea",
-            }
-            if role in editable_roles:
-                return True
-
-            # ── Check 2: AXSubrole (catches contenteditable in Electron/web apps) ──
-            subrole_ptr = ctypes.c_void_p()
-            attr_subrole = _cfstr("AXSubrole")
-            err = hi.AXUIElementCopyAttributeValue(focused, attr_subrole, ctypes.byref(subrole_ptr))
-            if err == 0 and subrole_ptr.value:
-                subrole = _read_cfstr(subrole_ptr.value)
-                if subrole in ("AXContentEditable", "AXTextEntry"):
-                    return True
-
-            # ── Check 3: AXSelectedText attribute exists (text-editing marker) ──
-            selected_ptr = ctypes.c_void_p()
-            attr_sel = _cfstr("AXSelectedText")
-            err = hi.AXUIElementCopyAttributeValue(focused, attr_sel, ctypes.byref(selected_ptr))
-            if err == 0:
-                # If we can read AXSelectedText at all, it's a text editing context
-                return True
-
-            # ── Check 4: AXValue is settable (writable = editable) ──
-            attr_value = _cfstr("AXValue")
-            writable = ctypes.c_bool(False)
-            err = hi.AXUIElementIsAttributeSettable(
-                focused, attr_value, ctypes.byref(writable)
-            )
-            if err == 0 and writable.value:
-                return True
-
-            # ── Check 5: AXInsertionPointLineNumber exists (another text marker) ──
-            line_ptr = ctypes.c_void_p()
-            attr_line = _cfstr("AXInsertionPointLineNumber")
-            err = hi.AXUIElementCopyAttributeValue(focused, attr_line, ctypes.byref(line_ptr))
-            if err == 0:
-                return True
-
-            # ── Check 6: Walk up the AXParent chain (up to 6 levels) ──
-            # Electron/web apps often focus a child element (AXGroup, AXStaticText)
-            # inside the actual editable container.  Walk up to find it.
-            attr_parent = _cfstr("AXParent")
-            current = focused.value
-            for _ in range(6):
-                parent_ptr = ctypes.c_void_p()
-                err = hi.AXUIElementCopyAttributeValue(
-                    current, attr_parent, ctypes.byref(parent_ptr)
-                )
-                if err != 0 or not parent_ptr.value:
-                    break
-                current = parent_ptr.value
-
-                # Check parent role
-                p_role_ptr = ctypes.c_void_p()
-                err = hi.AXUIElementCopyAttributeValue(
-                    current, attr_role, ctypes.byref(p_role_ptr)
-                )
-                if err == 0 and p_role_ptr.value:
-                    p_role = _read_cfstr(p_role_ptr.value)
-                    if p_role in editable_roles:
-                        return True
-
-                # Check parent subrole
-                p_sub_ptr = ctypes.c_void_p()
-                err = hi.AXUIElementCopyAttributeValue(
-                    current, attr_subrole, ctypes.byref(p_sub_ptr)
-                )
-                if err == 0 and p_sub_ptr.value:
-                    p_sub = _read_cfstr(p_sub_ptr.value)
-                    if p_sub in ("AXContentEditable", "AXTextEntry"):
-                        return True
-
-                # Check parent for AXSelectedText
-                p_sel_ptr = ctypes.c_void_p()
-                err = hi.AXUIElementCopyAttributeValue(
-                    current, attr_sel, ctypes.byref(p_sel_ptr)
-                )
-                if err == 0:
-                    return True
-
-            # ── Check 7: Electron/browser app heuristic ──
-            # If the frontmost app is a known Electron or browser app,
-            # Cmd+V paste is safe to attempt (worst case: nothing happens).
-            bundle_id = front_app.bundleIdentifier() or ""
-            electron_ids = {
-                "com.anthropic.claudedesktop",   # Claude Desktop
-                "com.electron.",                  # generic Electron prefix
-                "com.microsoft.VSCode",
-                "com.hnc.Discord",
-                "com.slack.Slack",
-                "com.spotify.client",
-                "com.figma.Desktop",
-                "com.notion.id",
-                "com.linear",
-            }
-            # Check exact match or prefix match
-            for eid in electron_ids:
-                if bundle_id == eid or bundle_id.startswith(eid):
-                    log.info(f"Electron/browser heuristic match: {bundle_id}")
-                    return True
-
-            # Also check if the app's executable contains "Electron" or "electron"
             try:
-                exe_url = front_app.executableURL()
-                if exe_url:
-                    exe_path = exe_url.path()
-                    if exe_path and ("Electron" in exe_path or "electron" in exe_path):
-                        log.info(f"Electron executable detected: {exe_path}")
-                        return True
-            except Exception:
-                pass
+                # Get front application PID
+                front_app = NSWorkspace.sharedWorkspace().frontmostApplication()
+                if not front_app:
+                    return False
+                pid = front_app.processIdentifier()
 
-            return False
+                app_ref = hi.AXUIElementCreateApplication(pid)
+                if not app_ref:
+                    return False
+                _cf_owned.append(app_ref)
+
+                # Pre-create attribute name strings (reused across checks)
+                attr_focus = _cfstr("AXFocusedUIElement")
+                attr_role = _cfstr("AXRole")
+                attr_subrole = _cfstr("AXSubrole")
+                attr_sel = _cfstr("AXSelectedText")
+                attr_value = _cfstr("AXValue")
+                attr_line = _cfstr("AXInsertionPointLineNumber")
+                attr_parent = _cfstr("AXParent")
+
+                # Get focused element
+                focused = ctypes.c_void_p()
+                err = hi.AXUIElementCopyAttributeValue(app_ref, attr_focus, ctypes.byref(focused))
+                if err != 0 or not focused.value:
+                    return False
+                _track(focused.value)
+
+                editable_roles = {
+                    "AXTextField", "AXTextArea", "AXComboBox",
+                    "AXSearchField", "AXWebArea",
+                }
+
+                # ── Check 1: AXRole ──
+                role_ptr = ctypes.c_void_p()
+                err = hi.AXUIElementCopyAttributeValue(focused, attr_role, ctypes.byref(role_ptr))
+                role = None
+                if err == 0 and role_ptr.value:
+                    _track(role_ptr.value)
+                    role = _read_cfstr(role_ptr.value)
+                if role in editable_roles:
+                    return True
+
+                # ── Check 2: AXSubrole (catches contenteditable in Electron/web apps) ──
+                subrole_ptr = ctypes.c_void_p()
+                err = hi.AXUIElementCopyAttributeValue(focused, attr_subrole, ctypes.byref(subrole_ptr))
+                if err == 0 and subrole_ptr.value:
+                    _track(subrole_ptr.value)
+                    subrole = _read_cfstr(subrole_ptr.value)
+                    if subrole in ("AXContentEditable", "AXTextEntry"):
+                        return True
+
+                # ── Check 3: AXSelectedText attribute exists (text-editing marker) ──
+                selected_ptr = ctypes.c_void_p()
+                err = hi.AXUIElementCopyAttributeValue(focused, attr_sel, ctypes.byref(selected_ptr))
+                if err == 0:
+                    if selected_ptr.value:
+                        _track(selected_ptr.value)
+                    return True
+
+                # ── Check 4: AXValue is settable (writable = editable) ──
+                writable = ctypes.c_bool(False)
+                err = hi.AXUIElementIsAttributeSettable(
+                    focused, attr_value, ctypes.byref(writable)
+                )
+                if err == 0 and writable.value:
+                    return True
+
+                # ── Check 5: AXInsertionPointLineNumber exists (another text marker) ──
+                line_ptr = ctypes.c_void_p()
+                err = hi.AXUIElementCopyAttributeValue(focused, attr_line, ctypes.byref(line_ptr))
+                if err == 0:
+                    if line_ptr.value:
+                        _track(line_ptr.value)
+                    return True
+
+                # ── Check 6: Walk up the AXParent chain (up to 6 levels) ──
+                current = focused.value
+                for _ in range(6):
+                    parent_ptr = ctypes.c_void_p()
+                    err = hi.AXUIElementCopyAttributeValue(
+                        current, attr_parent, ctypes.byref(parent_ptr)
+                    )
+                    if err != 0 or not parent_ptr.value:
+                        break
+                    _track(parent_ptr.value)
+                    current = parent_ptr.value
+
+                    # Check parent role
+                    p_role_ptr = ctypes.c_void_p()
+                    err = hi.AXUIElementCopyAttributeValue(
+                        current, attr_role, ctypes.byref(p_role_ptr)
+                    )
+                    if err == 0 and p_role_ptr.value:
+                        _track(p_role_ptr.value)
+                        p_role = _read_cfstr(p_role_ptr.value)
+                        if p_role in editable_roles:
+                            return True
+
+                    # Check parent subrole
+                    p_sub_ptr = ctypes.c_void_p()
+                    err = hi.AXUIElementCopyAttributeValue(
+                        current, attr_subrole, ctypes.byref(p_sub_ptr)
+                    )
+                    if err == 0 and p_sub_ptr.value:
+                        _track(p_sub_ptr.value)
+                        p_sub = _read_cfstr(p_sub_ptr.value)
+                        if p_sub in ("AXContentEditable", "AXTextEntry"):
+                            return True
+
+                    # Check parent for AXSelectedText
+                    p_sel_ptr = ctypes.c_void_p()
+                    err = hi.AXUIElementCopyAttributeValue(
+                        current, attr_sel, ctypes.byref(p_sel_ptr)
+                    )
+                    if err == 0:
+                        if p_sel_ptr.value:
+                            _track(p_sel_ptr.value)
+                        return True
+
+                # ── Check 7: Electron/browser app heuristic ──
+                bundle_id = front_app.bundleIdentifier() or ""
+                electron_ids = {
+                    "com.anthropic.claudedesktop",
+                    "com.electron.",
+                    "com.microsoft.VSCode",
+                    "com.hnc.Discord",
+                    "com.slack.Slack",
+                    "com.spotify.client",
+                    "com.figma.Desktop",
+                    "com.notion.id",
+                    "com.linear",
+                }
+                for eid in electron_ids:
+                    if bundle_id == eid or bundle_id.startswith(eid):
+                        log.info(f"Electron/browser heuristic match: {bundle_id}")
+                        return True
+
+                try:
+                    exe_url = front_app.executableURL()
+                    if exe_url:
+                        exe_path = exe_url.path()
+                        if exe_path and ("Electron" in exe_path or "electron" in exe_path):
+                            log.info(f"Electron executable detected: {exe_path}")
+                            return True
+                except Exception:
+                    pass
+
+                return False
+            finally:
+                _cleanup()
         except Exception as e:
             log.warning(f"Could not check focused element: {e}")
-            return False  # default to overlay on error
+            return False
 
     def _paste_to_cursor(self, text):
         """Copy text to clipboard and Cmd+V paste into the active field."""
@@ -1801,20 +1849,19 @@ class MyScriber(rumps.App):
     # ── Update checker ───────────────────────────────────────────────────────
 
     def _check_for_updates(self, _):
-        """Check GitHub Releases for a newer version."""
+        """Check public gist for a newer version."""
         def _check():
             try:
                 import urllib.request, json as _json
                 req = urllib.request.Request(
                     UPDATE_URL,
-                    headers={"Accept": "application/vnd.github.v3+json",
-                             "User-Agent": "myScriber-updater"},
+                    headers={"User-Agent": "myScriber-updater"},
                 )
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = _json.loads(resp.read().decode())
 
-                remote_tag = data.get("tag_name", "").lstrip("v")
-                if not remote_tag:
+                remote_ver = data.get("version", "").lstrip("v")
+                if not remote_ver:
                     self._notify("myScriber", "Could not determine latest version.")
                     return
 
@@ -1822,16 +1869,15 @@ class MyScriber(rumps.App):
                 def ver(s):
                     return tuple(int(x) for x in s.split("."))
 
-                if ver(remote_tag) > ver(APP_VERSION):
+                if ver(remote_ver) > ver(APP_VERSION):
                     # Newer version available
-                    body = data.get("body", "")[:200]
-                    dl_url = data.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
+                    dl_url = data.get("download_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
 
                     from PyObjCTools import AppHelper
                     def _prompt():
                         result = subprocess.run(
                             ["osascript", "-e",
-                             f'display dialog "myScriber {remote_tag} is available!'
+                             f'display dialog "myScriber {remote_ver} is available!'
                              f'\\n\\nYou have version {APP_VERSION}.'
                              f'\\n\\nWould you like to download the update?" '
                              f'buttons {{"Later", "Download"}} '
