@@ -316,7 +316,74 @@ if shutil.which("iconutil"):
 else:
     print("  (iconutil not available here — runs on Mac during install)")
 
-# Volume-level menubar icons are pre-generated as indigo PNGs in assets/
-# (mic_vol_0..5.png and @2x variants) — do NOT regenerate here.
+# Volume-level menubar icons (indigo, same SDF mic shape as template)
+print("Generating indigo volume icons...")
+
+# Indigo intensity per level: 0=dim gray, 1-5=increasingly vivid indigo
+VOL_COLORS = [
+    (180, 180, 190),  # 0: light gray (idle)
+    (100, 85, 190),   # 1: dim indigo
+    (105, 85, 200),   # 2: medium
+    (95,  75, 215),   # 3: bright
+    (90,  65, 230),   # 4: brighter
+    (85,  55, 245),   # 5: vivid
+]
+
+def draw_menubar_indigo(size, level):
+    """Same SDF mic shape as draw_menubar, colored in indigo."""
+    S = size
+    SS = 8
+    HR = S * SS
+    pixels_hr = []
+
+    MW  = HR * 0.32
+    MH  = HR * 0.44
+    MX  = HR * 0.5 - MW / 2.0
+    MY  = HR * 0.04
+
+    ARC_CX = HR * 0.5
+    ARC_CY = MY + MH - HR * 0.02
+    ARC_R  = HR * 0.28
+    ARC_T  = max(3.0, HR * 0.11)
+
+    POLE_CX = HR * 0.5
+    POLE_Y1 = ARC_CY + ARC_R
+    POLE_Y2 = POLE_Y1 + HR * 0.13
+    POLE_T  = ARC_T
+
+    BASE_Y  = POLE_Y2
+    BASE_X1 = HR * 0.5 - HR * 0.20
+    BASE_X2 = HR * 0.5 + HR * 0.20
+    BASE_T  = ARC_T
+
+    for py_hr in range(HR):
+        for px_hr in range(HR):
+            px = px_hr + 0.5
+            py = py_hr + 0.5
+            d_capsule = sdf_capsule(px, py, MX, MY, MW, MH)
+            d_arc = sdf_circle_arc(px, py, ARC_CX, ARC_CY, ARC_R, ARC_T, 0, 180)
+            d_pole = sdf_rect(px, py, POLE_CX - POLE_T / 2, POLE_Y1, POLE_T, POLE_Y2 - POLE_Y1)
+            d_base = sdf_rect(px, py, BASE_X1, BASE_Y - BASE_T / 2, BASE_X2 - BASE_X1, BASE_T)
+            d = min(d_capsule, d_arc, d_pole, d_base)
+            alpha = clamp(0.5 - d)
+            pixels_hr.append(alpha)
+
+    r, g, b = VOL_COLORS[level]
+    pixels = []
+    for y in range(S):
+        for x in range(S):
+            total = 0.0
+            for sy in range(SS):
+                for sx in range(SS):
+                    total += pixels_hr[(y * SS + sy) * HR + (x * SS + sx)]
+            avg = total / (SS * SS)
+            a = int(clamp(avg) * 255)
+            pixels.append((r, g, b, a))
+    return pixels
+
+for lvl in range(6):
+    for sz, suffix in [(18, ""), (36, "@2x")]:
+        px = draw_menubar_indigo(sz, lvl)
+        write_png(ASSETS / f"mic_vol_{lvl}{suffix}.png", px, sz, sz)
 
 print("Icons done.")
