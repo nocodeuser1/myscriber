@@ -148,104 +148,8 @@ except Exception:
     _OverlayBtnHelper = None
 
 
-# ── ObjC WaveformView for futuristic sound visualization ──────────────────────
-try:
-    from Foundation import NSObject as _NSObject
-    from AppKit import NSView, NSColor, NSBezierPath, NSRect, NSSize, NSPoint
-    import objc as _objc
-
-    class _WaveformView(NSView):
-        """Custom NSView that draws a futuristic sound waveform with indigo-cyan gradient."""
-
-        def initWithFrame_(self, frame):
-            self = _objc.super(_WaveformView, self).initWithFrame_(frame)
-            if self is None:
-                return None
-            self._levels = [0.0] * 50  # 50 bars
-            self._mode = "recording"  # "recording" or "processing"
-            self._processing_phase = 0.0
-            return self
-
-        @_objc.python_method
-        def update_level_(self, rms):
-            """Update waveform with new RMS level (called from audio callback)."""
-            # Shift levels left, add new level on right with smoothing
-            self._levels.pop(0)
-            smoothed = self._levels[-1] * 0.7 + rms * 0.3 if self._levels else rms
-            self._levels.append(min(smoothed, 1.0))
-            self.setNeedsDisplay_(True)
-
-        @_objc.python_method
-        def tick_(self):
-            """Animation tick for processing mode (called by timer)."""
-            if self._mode == "processing":
-                self._processing_phase = (self._processing_phase + 0.1) % (2.0 * math.pi)
-                self.setNeedsDisplay_(True)
-
-        def drawRect_(self, rect):
-            """Render the waveform visualization."""
-            try:
-                # Dark semi-transparent background
-                NSColor.colorWithRed_green_blue_alpha_(15/255.0, 15/255.0, 25/255.0, 0.85).setFill()
-                NSBezierPath.fillRect_(rect)
-
-                frame = self.bounds()
-                w = frame.size.width
-                h = frame.size.height
-
-                if self._mode == "processing":
-                    # Smooth sine wave animation
-                    NSColor.colorWithRed_green_blue_alpha_(0.26, 0.22, 0.79, 0.8).setStroke()  # indigo
-                    path = NSBezierPath.bezierPath()
-                    for i in range(int(w)):
-                        x = float(i)
-                        # Sine wave that pulses back and forth
-                        y = h / 2.0 + (h / 4.0) * math.sin(
-                            (self._processing_phase + x / 20.0)
-                        )
-                        if i == 0:
-                            path.moveToPoint_(NSPoint(x, y))
-                        else:
-                            path.lineToPoint_(NSPoint(x, y))
-                    path.setLineWidth_(2.0)
-                    path.stroke()
-                else:
-                    # Recording mode: draw bars with gradient and glow
-                    bar_count = 50
-                    bar_w = w / bar_count
-                    for i, level in enumerate(self._levels):
-                        x = i * bar_w + 2
-                        bar_h = level * (h - 4)
-                        bar_y = (h - bar_h) / 2.0
-
-                        # Gradient from indigo (#4338CA) to cyan (#06B6D4)
-                        # Interpolate based on height
-                        t = min(level, 1.0)
-                        r = 0.26 + (0.024 * t)  # indigo to cyan red
-                        g = 0.22 + (0.71 * t)   # indigo to cyan green
-                        b = 0.79 - (0.23 * t)   # indigo to cyan blue
-                        a = 0.5 + (0.5 * t)     # fade in with level
-
-                        NSColor.colorWithRed_green_blue_alpha_(r, g, b, a).setFill()
-
-                        # Rounded rectangle bar
-                        bar_rect = NSRect(
-                            NSPoint(x, bar_y),
-                            NSSize(bar_w - 4, max(bar_h, 2))
-                        )
-                        bar_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                            bar_rect, 2.0, 2.0
-                        )
-                        bar_path.fill()
-            except Exception:
-                pass
-
-except Exception as e:
-    log.error(f"Failed to define _WaveformView class: {e}")
-    _WaveformView = None
-
-
-# _OverlayTextView removed — Enter/Shift+Enter handled via NSEvent local monitor
+# Waveform visualizer uses pre-rendered PNG images (see _load_wave_images)
+# Enter/Shift+Enter in overlay handled via NSEvent local monitor
 
 
 class MyScriber(rumps.App):
@@ -279,12 +183,13 @@ class MyScriber(rumps.App):
         self._last_vol_level = -1
         self._volume_icons  = []  # NSImages for volume levels (blue mic)
         self._waveform_window = None
-        self._waveform_view = None
+        self._waveform_image_view = None
         self._waveform_timer = None
         self._hotkey_health_timer = None
 
         self._set_app_icon()
         self._load_volume_icons()
+        self._load_wave_images()
         self._build_menu()
         self._request_accessibility()
         self._load_model_async()
@@ -384,28 +289,60 @@ class MyScriber(rumps.App):
         except Exception as e:
             log.warning(f"Could not set volume icon: {e}")
 
-    # ── Waveform window management ───────────────────────────────────────────
+    # ── Waveform window management (image-based) ─────────────────────────────
+
+    _wave_images = []        # pre-loaded NSImages for volume levels 0-5
+    _wave_processing_img = None  # processing state image
+    _waveform_image_view = None  # NSImageView in the overlay window
+
+    def _load_wave_images(self):
+        """Pre-load soundwave volume PNG icons for the waveform overlay."""
+        try:
+            from AppKit import NSImage, NSSize
+            for i in range(6):
+                retina = ASSETS_DIR / f"wave_vol_{i}@2x.png"
+                normal = ASSETS_DIR / f"wave_vol_{i}.png"
+                img = None
+                if retina.exists():
+                    img = NSImage.alloc().initWithContentsOfFile_(str(retina))
+                    if img:
+                        img.setSize_(NSSize(120, 40))  # retina renders at 2x
+                elif normal.exists():
+                    img = NSImage.alloc().initWithContentsOfFile_(str(normal))
+                self._wave_images.append(img)
+            # Processing image
+            retina_p = ASSETS_DIR / "wave_processing@2x.png"
+            if retina_p.exists():
+                img = NSImage.alloc().initWithContentsOfFile_(str(retina_p))
+                if img:
+                    img.setSize_(NSSize(120, 40))
+                self._wave_processing_img = img
+            log.info(f"Loaded {len([i for i in self._wave_images if i])} wave images")
+        except Exception as e:
+            log.warning(f"Could not load wave images: {e}")
 
     def _show_waveform(self):
-        """Create and show a borderless waveform window at bottom center."""
+        """Create and show a small borderless waveform overlay at bottom center."""
         try:
             from AppKit import (
                 NSWindow, NSWindowStyleMaskBorderless, NSBackingStoreBuffered,
-                NSFloatingWindowLevel, NSColor, NSScreen,
-                NSMakeRect, NSMakeSize, NSMakePoint,
+                NSFloatingWindowLevel, NSColor, NSScreen, NSImageView,
+                NSMakeRect, NSMakePoint, NSImageScaleProportionallyUpOrDown,
             )
 
-            if not _WaveformView:
-                log.warning("_WaveformView class not available — skipping waveform")
+            if not self._wave_images or not any(self._wave_images):
+                self._load_wave_images()
+            if not self._wave_images or not any(self._wave_images):
+                log.warning("Wave images not available — skipping waveform")
                 return
 
             # Hide existing waveform if any
             if self._waveform_window:
                 self._hide_waveform()
 
-            # Create window: 500px wide, 60px tall
+            # Small window: 120x40 pt
             window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-                NSMakeRect(0, 0, 500, 60),
+                NSMakeRect(0, 0, 120, 40),
                 NSWindowStyleMaskBorderless,
                 NSBackingStoreBuffered,
                 False,
@@ -417,29 +354,25 @@ class MyScriber(rumps.App):
             window.setIgnoresMouseEvents_(True)
             window.setCollectionBehavior_(1 << 0)  # NSWindowCollectionBehaviorCanJoinAllSpaces
 
-            # Rounded corners via content view layer
-            cv = window.contentView()
-            cv.setWantsLayer_(True)
-            cv.layer().setCornerRadius_(16)
-            cv.layer().setMasksToBounds_(True)
+            # Image view fills window
+            iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 40))
+            iv.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+            if self._wave_images[0]:
+                iv.setImage_(self._wave_images[0])
+            window.setContentView_(iv)
+            self._waveform_image_view = iv
 
-            # Create and add waveform view
-            waveform = _WaveformView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 60))
-            window.setContentView_(waveform)
-            self._waveform_view = waveform
-            waveform._mode = "recording"
-
-            # Position: centered horizontally, 40px from bottom
+            # Position: centered horizontally, 30px from bottom
             screen = NSScreen.mainScreen()
             if screen:
                 sf = screen.visibleFrame()
-                window_x = sf.origin.x + (sf.size.width - 500) / 2.0
-                window_y = sf.origin.y + 40
+                window_x = sf.origin.x + (sf.size.width - 120) / 2.0
+                window_y = sf.origin.y + 30
                 window.setFrameOrigin_(NSMakePoint(window_x, window_y))
 
             self._waveform_window = window
             window.orderFrontRegardless()
-            log.info("Waveform window shown")
+            log.info("Waveform overlay shown")
         except Exception as e:
             log.warning(f"Could not show waveform: {e}")
 
@@ -457,56 +390,36 @@ class MyScriber(rumps.App):
             except Exception:
                 pass
             self._waveform_window = None
-        self._waveform_view = None
-        log.info("Waveform window hidden")
+        self._waveform_image_view = None
+        log.info("Waveform overlay hidden")
 
     def _set_waveform_processing(self):
-        """Switch waveform to processing/thinking animation mode."""
-        if not self._waveform_view:
+        """Switch waveform overlay to processing image."""
+        if not self._waveform_image_view:
             return
         try:
-            self._waveform_view._mode = "processing"
-            self._waveform_view._processing_phase = 0.0
-
-            # Start animation timer: tick every 0.03 seconds
-            def _tick():
-                if self._waveform_view:
-                    try:
-                        self._waveform_view.tick_()
-                    except Exception:
-                        pass
-
-            from PyObjCTools import AppHelper
-            from Foundation import NSTimer
-
-            if self._waveform_timer:
-                try:
-                    self._waveform_timer.invalidate()
-                except Exception:
-                    pass
-
-            self._waveform_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                0.03, self, "waveformTick:", None, True
-            )
+            if self._wave_processing_img:
+                self._waveform_image_view.setImage_(self._wave_processing_img)
             log.info("Waveform switched to processing mode")
         except Exception as e:
             log.warning(f"Could not set waveform processing: {e}")
 
-    def waveformTick_(self, timer):
-        """Called by NSTimer to update waveform animation."""
-        if self._waveform_view:
-            try:
-                self._waveform_view.tick_()
-            except Exception:
-                pass
-
     def _update_waveform(self, rms):
-        """Thread-safe update of waveform visualization."""
-        if not self._waveform_view:
+        """Thread-safe update of waveform overlay image based on volume level."""
+        if not self._waveform_image_view or not self._wave_images:
             return
         try:
             from PyObjCTools import AppHelper
-            AppHelper.callAfter(lambda r=rms: self._waveform_view.update_level_(r))
+            if rms > 0.002:
+                db = 20.0 * math.log10(rms)
+                level = max(1, min(int((db + 54) / 8), 5))
+            else:
+                level = 0
+            img = self._wave_images[level] if level < len(self._wave_images) else None
+            if img:
+                AppHelper.callAfter(
+                    lambda i=img: self._waveform_image_view.setImage_(i) if self._waveform_image_view else None
+                )
         except Exception:
             pass
 
@@ -1590,14 +1503,23 @@ class MyScriber(rumps.App):
 
     def _paste_to_cursor(self, text):
         """Copy text to clipboard and Cmd+V paste into the active field."""
+        log.info(f"Pasting to cursor: {text[:40]}...")
         proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
         proc.communicate(text.encode("utf-8"))
-        time.sleep(0.15)
-        subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to keystroke "v" using command down'],
-            capture_output=True,
-        )
+        # Run the Cmd+V paste in a background thread so the sleep doesn't
+        # block the main run loop (which would prevent the app from refocusing)
+        def _do_paste():
+            time.sleep(0.25)  # allow focus to settle back to previous app
+            result = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to keystroke "v" using command down'],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                log.warning(f"Paste AppleScript failed: {result.stderr}")
+            else:
+                log.info("Paste Cmd+V sent successfully")
+        threading.Thread(target=_do_paste, daemon=True).start()
 
     # ── Overlay panel (persistent, supports re-dictation) ──────────────────
 
