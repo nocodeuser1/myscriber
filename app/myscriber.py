@@ -148,6 +148,152 @@ except Exception:
     _OverlayBtnHelper = None
 
 
+# ── ObjC WaveformView for futuristic sound visualization ──────────────────────
+try:
+    from Foundation import NSObject as _NSObject
+    from AppKit import NSView, NSColor, NSBezierPath, NSRect, NSSize, NSPoint
+    import objc as _objc
+
+    class _WaveformView(NSView):
+        """Custom NSView that draws a futuristic sound waveform with indigo-cyan gradient."""
+
+        def init(self):
+            self = super(_WaveformView, self).init()
+            if self is None:
+                return None
+            self._levels = [0.0] * 50  # 50 bars
+            self._mode = "recording"  # "recording" or "processing"
+            self._processing_phase = 0.0
+            return self
+
+        @_objc.python_method
+        def update_level_(self, rms):
+            """Update waveform with new RMS level (called from audio callback)."""
+            # Shift levels left, add new level on right with smoothing
+            self._levels.pop(0)
+            smoothed = self._levels[-1] * 0.7 + rms * 0.3 if self._levels else rms
+            self._levels.append(min(smoothed, 1.0))
+            self.setNeedsDisplay_(True)
+
+        @_objc.python_method
+        def tick_(self):
+            """Animation tick for processing mode (called by timer)."""
+            if self._mode == "processing":
+                self._processing_phase = (self._processing_phase + 0.1) % (2.0 * math.pi)
+                self.setNeedsDisplay_(True)
+
+        def drawRect_(self, rect):
+            """Render the waveform visualization."""
+            try:
+                # Dark semi-transparent background
+                NSColor.colorWithRed_green_blue_alpha_(15/255.0, 15/255.0, 25/255.0, 0.85).setFill()
+                NSBezierPath.fillRect_(rect)
+
+                frame = self.bounds()
+                w = frame.size.width
+                h = frame.size.height
+
+                if self._mode == "processing":
+                    # Smooth sine wave animation
+                    NSColor.colorWithRed_green_blue_alpha_(0.26, 0.22, 0.79, 0.8).setStroke()  # indigo
+                    path = NSBezierPath.bezierPath()
+                    for i in range(int(w)):
+                        x = float(i)
+                        # Sine wave that pulses back and forth
+                        y = h / 2.0 + (h / 4.0) * math.sin(
+                            (self._processing_phase + x / 20.0)
+                        )
+                        if i == 0:
+                            path.moveToPoint_(NSPoint(x, y))
+                        else:
+                            path.lineToPoint_(NSPoint(x, y))
+                    path.setLineWidth_(2.0)
+                    path.stroke()
+                else:
+                    # Recording mode: draw bars with gradient and glow
+                    bar_count = 50
+                    bar_w = w / bar_count
+                    for i, level in enumerate(self._levels):
+                        x = i * bar_w + 2
+                        bar_h = level * (h - 4)
+                        bar_y = (h - bar_h) / 2.0
+
+                        # Gradient from indigo (#4338CA) to cyan (#06B6D4)
+                        # Interpolate based on height
+                        t = min(level, 1.0)
+                        r = 0.26 + (0.024 * t)  # indigo to cyan red
+                        g = 0.22 + (0.71 * t)   # indigo to cyan green
+                        b = 0.79 - (0.23 * t)   # indigo to cyan blue
+                        a = 0.5 + (0.5 * t)     # fade in with level
+
+                        NSColor.colorWithRed_green_blue_alpha_(r, g, b, a).setFill()
+
+                        # Rounded rectangle bar
+                        bar_rect = NSRect(
+                            NSPoint(x, bar_y),
+                            NSSize(bar_w - 4, max(bar_h, 2))
+                        )
+                        bar_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                            bar_rect, 2.0, 2.0
+                        )
+                        bar_path.fill()
+            except Exception:
+                pass
+
+    class _WaveformView_Metaclass(_objc.ObjCMeta):
+        pass
+
+except Exception as e:
+    _WaveformView = None
+
+
+# ── ObjC OverlayTextView that intercepts Enter key ────────────────────────────
+try:
+    from AppKit import NSTextView
+    import objc as _objc
+
+    class _OverlayTextView(NSTextView):
+        """NSTextView subclass that wires Enter key to copy+close."""
+
+        def init(self):
+            self = super(_OverlayTextView, self).init()
+            if self is None:
+                return None
+            self._copy = None
+            return self
+
+        @_objc.python_method
+        def setup(self, copy_fn):
+            """Store the copy callback."""
+            self._copy = copy_fn
+
+        def keyDown_(self, event):
+            """Intercept Enter key; Shift+Enter inserts newline."""
+            try:
+                flags = event.modifierFlags()
+                has_shift = bool(flags & (1 << 17))  # Shift flag
+                keycode = event.keyCode()
+
+                # Enter key has keycode 36
+                if keycode == 36:  # Return/Enter
+                    if has_shift:
+                        # Shift+Enter: insert newline
+                        super(_OverlayTextView, self).keyDown_(event)
+                    else:
+                        # Enter (no Shift): call copy callback
+                        if self._copy:
+                            self._copy()
+                    return
+            except Exception:
+                pass
+
+            # All other keys: pass through to parent
+            super(_OverlayTextView, self).keyDown_(event)
+
+except Exception as e:
+    _OverlayTextView = None
+
+
 class MyScriber(rumps.App):
     def __init__(self):
         # Prefer @2x retina icon for crisp menubar rendering
@@ -178,6 +324,10 @@ class MyScriber(rumps.App):
         self._event_tap = None
         self._last_vol_level = -1
         self._volume_icons  = []  # NSImages for volume levels (blue mic)
+        self._waveform_window = None
+        self._waveform_view = None
+        self._waveform_timer = None
+        self._hotkey_health_timer = None
 
         self._set_app_icon()
         self._load_volume_icons()
@@ -279,6 +429,126 @@ class MyScriber(rumps.App):
                 btn.setImage_(img)
         except Exception as e:
             log.warning(f"Could not set volume icon: {e}")
+
+    # ── Waveform window management ───────────────────────────────────────────
+
+    def _show_waveform(self):
+        """Create and show a borderless waveform window at bottom center."""
+        try:
+            from AppKit import (
+                NSWindow, NSWindowStyleMaskBorderless, NSBackingStoreBuffered,
+                NSFloatingWindowLevel, NSColor, NSRect, NSSize, NSPoint,
+                NSApplication,
+            )
+            from PyObjCTools import AppHelper
+
+            if not _WaveformView:
+                return
+
+            # Create window: 500px wide, 60px tall
+            frame = NSRect(NSPoint(0, 0), NSSize(500, 60))
+            window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                frame, NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False
+            )
+            window.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0, 0, 0, 0))
+            window.setOpaque_(False)
+            window.setLevel_(NSFloatingWindowLevel)
+            window.setHidesOnDeactivate_(False)
+            window.setIgnoresMouseEvents_(True)
+
+            # Set rounded corners
+            try:
+                window.setCornerRadius_(16)
+            except Exception:
+                pass
+
+            # Create and add waveform view
+            waveform = _WaveformView.alloc().initWithFrame_(frame)
+            window.setContentView_(waveform)
+            self._waveform_view = waveform
+            waveform._mode = "recording"
+
+            # Position: centered horizontally, 40px from bottom
+            screen = NSApplication.sharedApplication().mainScreen()
+            if screen:
+                screen_frame = screen.visibleFrame()
+                screen_w = screen_frame.size.width
+                window_x = (screen_w - 500) / 2.0
+                window_y = screen_frame.origin.y + 40
+                window.setFrameOrigin_(NSPoint(window_x, window_y))
+
+            self._waveform_window = window
+            window.makeKeyAndOrderFront_(None)
+            log.info("Waveform window shown")
+        except Exception as e:
+            log.warning(f"Could not show waveform: {e}")
+
+    def _hide_waveform(self):
+        """Hide and release the waveform window."""
+        if self._waveform_timer:
+            try:
+                self._waveform_timer.invalidate()
+            except Exception:
+                pass
+            self._waveform_timer = None
+        if self._waveform_window:
+            try:
+                self._waveform_window.orderOut_(None)
+            except Exception:
+                pass
+            self._waveform_window = None
+        self._waveform_view = None
+        log.info("Waveform window hidden")
+
+    def _set_waveform_processing(self):
+        """Switch waveform to processing/thinking animation mode."""
+        if not self._waveform_view:
+            return
+        try:
+            self._waveform_view._mode = "processing"
+            self._waveform_view._processing_phase = 0.0
+
+            # Start animation timer: tick every 0.03 seconds
+            def _tick():
+                if self._waveform_view:
+                    try:
+                        self._waveform_view.tick_()
+                    except Exception:
+                        pass
+
+            from PyObjCTools import AppHelper
+            from Foundation import NSTimer
+
+            if self._waveform_timer:
+                try:
+                    self._waveform_timer.invalidate()
+                except Exception:
+                    pass
+
+            self._waveform_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.03, self, "waveformTick:", None, True
+            )
+            log.info("Waveform switched to processing mode")
+        except Exception as e:
+            log.warning(f"Could not set waveform processing: {e}")
+
+    def waveformTick_(self, timer):
+        """Called by NSTimer to update waveform animation."""
+        if self._waveform_view:
+            try:
+                self._waveform_view.tick_()
+            except Exception:
+                pass
+
+    def _update_waveform(self, rms):
+        """Thread-safe update of waveform visualization."""
+        if not self._waveform_view:
+            return
+        try:
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(lambda r=rms: self._waveform_view.update_level_(r))
+        except Exception:
+            pass
 
     _cached_template_icon = None  # cached multi-rep NSImage
 
@@ -543,6 +813,14 @@ class MyScriber(rumps.App):
 
     def _stop_hotkey(self):
         """Tear down the current hotkey listener.  Safe to call multiple times."""
+        # Cancel health check timer
+        if self._hotkey_health_timer:
+            try:
+                self._hotkey_health_timer.invalidate()
+            except Exception:
+                pass
+            self._hotkey_health_timer = None
+
         # Grab and CLEAR references first — prevents double-free if called twice
         tap = getattr(self, '_event_tap', None)
         source = getattr(self, '_event_tap_source', None)
@@ -632,7 +910,7 @@ class MyScriber(rumps.App):
                 # Re-enable tap if macOS disabled it (callback took too long)
                 if etype == Quartz.kCGEventTapDisabledByTimeout:
                     Quartz.CGEventTapEnable(app._event_tap, True)
-                    log.info("CGEventTap re-enabled after timeout")
+                    log.warning("kCGEventTapDisabledByTimeout: CGEventTap was disabled, re-enabled now")
                     # Don't auto-stop recording here — the user may still
                     # be holding the key.  The 2-min safety timer handles
                     # truly stuck recordings.  Re-enabling the tap is
@@ -646,10 +924,14 @@ class MyScriber(rumps.App):
                 flags = Quartz.CGEventGetFlags(event)
                 mods = flags & 0x00FF0000  # isolate modifier bits
 
+                event_type_str = "KeyDown" if etype == Quartz.kCGEventKeyDown else "KeyUp"
+
                 if kc == keycode and (mods & mod_mask) == mod_mask:
+                    log.info(f"Hotkey {event_type_str}: keycode={kc}, flags=0x{flags:x}")
                     if etype == Quartz.kCGEventKeyDown:
                         # Ignore key-repeat events after a safety stop
                         if wait_for_up["active"]:
+                            log.info("Hotkey KeyDown suppressed: wait_for_up is active")
                             pass  # swallow repeats until real key-up
                         elif not pressed["down"]:
                             pressed["down"] = True
@@ -675,14 +957,16 @@ class MyScriber(rumps.App):
                     # which segfaults CoreGraphics.
                     try:
                         Quartz.CGEventSetType(event, kCGEventNull)
+                        log.info(f"Hotkey {event_type_str} suppressed (converted to null)")
                     except Exception:
-                        pass  # if SetType fails, event passes through unsuppressed
+                        log.warning(f"Could not suppress hotkey {event_type_str}")
                     return event
 
                 # Also check for modifier-only key-up (user released modifier
                 # before releasing the trigger key).  If our hotkey modifier
                 # is no longer held, treat it as a release.
                 if pressed["down"] and (mods & mod_mask) != mod_mask:
+                    log.info(f"Modifier released: mods=0x{mods:x}, required=0x{mod_mask:x}")
                     pressed["down"] = False
                     app._stop_and_transcribe()
 
@@ -731,7 +1015,48 @@ class MyScriber(rumps.App):
         Quartz.CGEventTapEnable(tap, True)
 
         log.info("CGEventTap hotkey registered (Quartz) — key events will be suppressed")
+
+        # Start health check timer (every 30 seconds)
+        def _health_check():
+            if app._event_tap is None:
+                log.error("Hotkey health check: tap is dead (None), re-registering")
+                try:
+                    app._register_hotkey()
+                except Exception as e:
+                    log.error(f"Re-registration failed: {e}")
+                return
+            try:
+                # Check if tap is still enabled
+                Quartz.CGEventTapEnable(app._event_tap, True)
+                log.info("Hotkey health check: tap alive and re-enabled")
+            except Exception as e:
+                log.error(f"Hotkey health check: tap error - {e}")
+
+        from Foundation import NSTimer
+        self._hotkey_health_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            30.0, self, "hotkeyHealthCheck:", None, True
+        )
+
         return True
+
+    def hotkeyHealthCheck_(self, timer):
+        """Called by NSTimer to check if the hotkey tap is still alive."""
+        try:
+            import Quartz
+            if self._event_tap is None:
+                log.error("Hotkey health check: tap is dead (None), re-registering")
+                try:
+                    self._register_hotkey()
+                except Exception as e:
+                    log.error(f"Re-registration failed: {e}")
+                return
+            try:
+                Quartz.CGEventTapEnable(self._event_tap, True)
+                log.info("Hotkey health check: tap alive and re-enabled")
+            except Exception as e:
+                log.error(f"Hotkey health check: tap error - {e}")
+        except Exception as e:
+            log.error(f"Hotkey health check exception: {e}")
 
     # ── pynput fallback (toggle mode / no Accessibility) ─────────────────
 
@@ -838,15 +1163,18 @@ class MyScriber(rumps.App):
 
     def _start_recording(self):
         if not self.model_loaded:
+            log.info("Recording rejected: model not loaded")
             self._notify("myScriber", "Model still loading — please wait.")
             return
         if self._transcribing:
-            log.info("Transcription in progress — ignoring new recording request")
+            log.info("Recording rejected: transcription in progress")
             self._notify("myScriber", "Still transcribing — please wait.")
             return
         self.recording    = True
         self.audio_frames = []
         self._last_vol_level = -1
+
+        log.info(f"Recording STARTED (thread={threading.current_thread().name})")
 
         # Show blue mic at level 0 (outline only = "listening, no sound yet")
         # All AppKit/UI ops must happen on main thread
@@ -855,6 +1183,7 @@ class MyScriber(rumps.App):
             def _start_ui():
                 self.title = ""
                 self._set_volume_icon(0)
+                self._show_waveform()
             AppHelper.callAfter(_start_ui)
         except Exception:
             pass
@@ -891,6 +1220,8 @@ class MyScriber(rumps.App):
                     if level != app._last_vol_level:
                         app._last_vol_level = level
                         _AH.callAfter(lambda l=level: app._set_volume_icon(l))
+                    # Update waveform with RMS
+                    app._update_waveform(rms)
                 except Exception:
                     pass
 
@@ -910,6 +1241,8 @@ class MyScriber(rumps.App):
             self.stream.close()
             self.stream = None
 
+        log.info(f"Recording STOPPED, starting transcription (thread={threading.current_thread().name})")
+
         # Restore normal template icon and show "transcribing" indicator
         # IMPORTANT: All AppKit/UI operations must happen on the main thread
         # to avoid segfaults. Never set self.title or access overlay panel
@@ -919,6 +1252,7 @@ class MyScriber(rumps.App):
             def _ui_cleanup():
                 self._restore_template_icon()
                 self.title = ""
+                self._set_waveform_processing()  # Switch to processing animation
                 if self._overlay_panel:
                     self._overlay_set_recording(False)
             AppHelper.callAfter(_ui_cleanup)
@@ -928,6 +1262,7 @@ class MyScriber(rumps.App):
         def _transcribe():
             self._transcribing = True
             tmp = None
+            transcribe_start = time.time()
             try:
                 if not self.audio_frames:
                     self._set_title("")
@@ -960,6 +1295,8 @@ class MyScriber(rumps.App):
                         result = self.whisper_model.transcribe(tmp, language=lang, fp16=False)
 
                 text = result["text"].strip()
+                transcribe_duration = time.time() - transcribe_start
+                log.info(f"Transcription completed in {transcribe_duration:.2f}s: {text[:60]}")
 
                 if text:
                     # Deliver on main thread — AX API + AppKit must run there
@@ -976,6 +1313,12 @@ class MyScriber(rumps.App):
                         os.unlink(tmp)
                     except Exception:
                         pass
+                # Hide waveform when transcription is complete
+                try:
+                    from PyObjCTools import AppHelper
+                    AppHelper.callAfter(self._hide_waveform)
+                except Exception:
+                    pass
 
         threading.Thread(target=_transcribe, daemon=True).start()
 
@@ -1439,7 +1782,8 @@ class MyScriber(rumps.App):
             scroll.setAutoresizingMask_(2 | 16)  # width + height flexible
 
             cs = scroll.contentSize()
-            tv = NSTextView.alloc().initWithFrame_(
+            # Use _OverlayTextView to handle Enter key interception
+            tv = _OverlayTextView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, cs.width, cs.height)
             )
             tv.setFont_(NSFont.systemFontOfSize_(14))
@@ -1480,7 +1824,7 @@ class MyScriber(rumps.App):
             copy_btn.setTitle_("Copy to Clipboard")
             copy_btn.setBezelStyle_(NSBezelStyleRounded)
             copy_btn.setFont_(NSFont.boldSystemFontOfSize_(13))
-            copy_btn.setKeyEquivalent_("\r")  # Enter key
+            # Don't set key equivalent here — Enter is now handled by _OverlayTextView
             bg.addSubview_(copy_btn)
 
             # Wire button actions using block-based approach
@@ -1494,6 +1838,9 @@ class MyScriber(rumps.App):
                     proc.communicate(edited.encode("utf-8"))
                     self._notify("myScriber", "Copied to clipboard!")
                 self._close_overlay()
+
+            # Wire Enter key in text view to copy function
+            tv.setup(_do_copy)
 
             # Use module-level _OverlayBtnHelper (defined once to avoid
             # PyObjC crash from re-registering the same ObjC class name)
