@@ -149,27 +149,35 @@ except Exception:
 
 
 # ── ObjC delegate for notification click (must be defined once at module level) ──
+# Module-level ref so ObjC callbacks can reach the app even if instance attrs are lost
+_notif_app_ref = None
+
 try:
     from Foundation import NSObject as _NSObj2
     import objc as _objc2
 
     class _NotifDelegate(_NSObj2):
         """Handles NSUserNotificationCenter delegate to respond to notification clicks."""
-        @_objc2.python_method
-        def setup(self, app_ref):
-            self._app = app_ref
 
         def userNotificationCenter_didActivateNotification_(self, center, notif):
             """Called when user clicks a notification."""
+            global _notif_app_ref
             try:
+                log.info("Notification clicked — delegate callback fired")
                 info = notif.userInfo()
+                log.info(f"Notification userInfo: {info}")
                 if info and info.get("action") == "show_overlay":
                     text = info.get("text", "")
-                    if text and self._app:
+                    if text and _notif_app_ref:
                         from PyObjCTools import AppHelper
-                        AppHelper.callAfter(lambda t=text: self._app._show_overlay(t))
-            except Exception:
-                pass
+                        AppHelper.callAfter(lambda t=text: _notif_app_ref._show_overlay(t))
+                        log.info("Scheduled overlay show from notification click")
+                    else:
+                        log.warning(f"Notification click: text={bool(text)}, app_ref={bool(_notif_app_ref)}")
+                else:
+                    log.info("Notification click: no show_overlay action in userInfo")
+            except Exception as e:
+                log.error(f"Notification click handler error: {e}", exc_info=True)
             # Remove the delivered notification
             try:
                 center.removeDeliveredNotification_(notif)
@@ -293,13 +301,14 @@ class MyScriber(rumps.App):
 
     def _setup_notification_delegate(self):
         """Set up NSUserNotificationCenter delegate to handle notification clicks."""
+        global _notif_app_ref
         try:
             if not _NotifDelegate:
                 log.warning("NotifDelegate class not available")
                 return
             from Foundation import NSUserNotificationCenter
+            _notif_app_ref = self  # module-level ref for ObjC callback
             delegate = _NotifDelegate.alloc().init()
-            delegate.setup(self)
             center = NSUserNotificationCenter.defaultUserNotificationCenter()
             center.setDelegate_(delegate)
             self._notif_delegate = delegate  # prevent GC
@@ -591,8 +600,13 @@ class MyScriber(rumps.App):
                 notif.setContentImage_(self._app_icon_image)
             if user_info:
                 notif.setUserInfo_(NSDictionary.dictionaryWithDictionary_(user_info))
+                # Make notification clickable with an action button
+                notif.setHasActionButton_(True)
+                notif.setActionButtonTitle_("Open Editor")
+                log.info(f"Delivering clickable notification with userInfo: {user_info}")
             center = NSUserNotificationCenter.defaultUserNotificationCenter()
             center.deliverNotification_(notif)
+            log.info(f"Notification delivered via NSUserNotification (delegate={center.delegate()})")
         except Exception as e:
             log.warning(f"Custom notification failed, falling back to rumps: {e}")
             rumps.notification(title, subtitle, message)
