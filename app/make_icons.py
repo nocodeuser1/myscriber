@@ -316,13 +316,7 @@ if shutil.which("iconutil"):
 else:
     print("  (iconutil not available here — runs on Mac during install)")
 
-# Volume-level menubar icons (blue, 6 levels: 0=outline, 5=full fill)
-print("Generating volume icons...")
-VOL_LEVELS = 6
-for lvl in range(VOL_LEVELS):
-    fill = lvl / (VOL_LEVELS - 1)
-    for sz, suffix in [(18, ""), (36, "@2x")]:
-        px = draw_menubar_volume(sz, fill)
-        write_png(ASSETS / f"mic_vol_{lvl}{suffix}.png", px, sz, sz)
+# Volume-level menubar icons are pre-generated as indigo PNGs in assets/
+# (mic_vol_0..5.png and @2x variants) — do NOT regenerate here.
 
 print("Icons done.")
