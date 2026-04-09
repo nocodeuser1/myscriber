@@ -148,6 +148,40 @@ except Exception:
     _OverlayBtnHelper = None
 
 
+# ── ObjC delegate for notification click (must be defined once at module level) ──
+try:
+    from Foundation import NSObject as _NSObj2
+    import objc as _objc2
+
+    class _NotifDelegate(_NSObj2):
+        """Handles NSUserNotificationCenter delegate to respond to notification clicks."""
+        @_objc2.python_method
+        def setup(self, app_ref):
+            self._app = app_ref
+
+        def userNotificationCenter_didActivateNotification_(self, center, notif):
+            """Called when user clicks a notification."""
+            try:
+                info = notif.userInfo()
+                if info and info.get("action") == "show_overlay":
+                    text = info.get("text", "")
+                    if text and self._app:
+                        from PyObjCTools import AppHelper
+                        AppHelper.callAfter(lambda t=text: self._app._show_overlay(t))
+            except Exception:
+                pass
+            # Remove the delivered notification
+            try:
+                center.removeDeliveredNotification_(notif)
+            except Exception:
+                pass
+
+        def userNotificationCenter_shouldPresentNotification_(self, center, notif):
+            """Always show notifications even if app is frontmost."""
+            return True
+except Exception:
+    _NotifDelegate = None
+
 # Waveform visualizer uses pre-rendered PNG images (see _load_wave_images)
 # Enter/Shift+Enter in overlay handled via NSEvent local monitor
 
@@ -186,8 +220,12 @@ class MyScriber(rumps.App):
         self._waveform_image_view = None
         self._waveform_timer = None
         self._hotkey_health_timer = None
+        self._last_transcribed_text = ""  # for notification click → overlay
+        self._notif_delegate = None
+        self._last_waveform_update = 0.0  # throttle waveform updates
 
         self._set_app_icon()
+        self._setup_notification_delegate()
         self._load_volume_icons()
         self._load_wave_images()
         self._build_menu()
@@ -252,6 +290,22 @@ class MyScriber(rumps.App):
             log.warning("No app icon available")
         except Exception as e:
             log.warning(f"Could not set app icon: {e}")
+
+    def _setup_notification_delegate(self):
+        """Set up NSUserNotificationCenter delegate to handle notification clicks."""
+        try:
+            if not _NotifDelegate:
+                log.warning("NotifDelegate class not available")
+                return
+            from Foundation import NSUserNotificationCenter
+            delegate = _NotifDelegate.alloc().init()
+            delegate.setup(self)
+            center = NSUserNotificationCenter.defaultUserNotificationCenter()
+            center.setDelegate_(delegate)
+            self._notif_delegate = delegate  # prevent GC
+            log.info("Notification delegate installed")
+        except Exception as e:
+            log.warning(f"Could not set notification delegate: {e}")
 
     def _load_volume_icons(self):
         """Pre-load blue volume-level icons for recording feedback."""
@@ -405,9 +459,14 @@ class MyScriber(rumps.App):
             log.warning(f"Could not set waveform processing: {e}")
 
     def _update_waveform(self, rms):
-        """Thread-safe update of waveform overlay image based on volume level."""
+        """Thread-safe update of waveform overlay image based on volume level.
+        Throttled to ~8 fps to avoid flooding the main thread with callAfter."""
         if not self._waveform_image_view or not self._wave_images:
             return
+        now = time.time()
+        if now - self._last_waveform_update < 0.125:  # max 8 updates/sec
+            return
+        self._last_waveform_update = now
         try:
             from PyObjCTools import AppHelper
             if rms > 0.002:
@@ -460,14 +519,16 @@ class MyScriber(rumps.App):
             except Exception:
                 pass
 
-    def _notify(self, title, message, subtitle=""):
+    def _notify(self, title, message, subtitle="", user_info=None):
         """Send a macOS notification with the myScriber icon.
 
         Uses NSUserNotification with contentImage set to our icon as a
         fallback in case the bundle identity patch alone isn't enough.
+        If user_info is provided, it will be attached to the notification
+        so that clicking it can trigger actions (e.g. show overlay).
         """
         try:
-            from Foundation import NSUserNotification, NSUserNotificationCenter
+            from Foundation import NSUserNotification, NSUserNotificationCenter, NSDictionary
             notif = NSUserNotification.alloc().init()
             notif.setTitle_(title)
             if subtitle:
@@ -476,6 +537,8 @@ class MyScriber(rumps.App):
             # Set our icon as the content image (appears alongside text)
             if self._app_icon_image:
                 notif.setContentImage_(self._app_icon_image)
+            if user_info:
+                notif.setUserInfo_(NSDictionary.dictionaryWithDictionary_(user_info))
             center = NSUserNotificationCenter.defaultUserNotificationCenter()
             center.deliverNotification_(notif)
         except Exception as e:
@@ -1225,8 +1288,10 @@ class MyScriber(rumps.App):
     # ── Smart paste / overlay ────────────────────────────────────────────────
 
     def _deliver_text(self, text):
-        """Paste text directly if focused element is editable, else show overlay.
-        If overlay is already open, append new text there instead."""
+        """Paste text directly if focused element is editable, else copy to
+        clipboard and show a notification.  Clicking the notification opens
+        the overlay editor so the user can refine the text before copying.
+        If the overlay is already open, new text is appended there instead."""
         try:
             # If overlay is already open, always append there
             if self._overlay_panel and self._overlay_panel.isVisible():
@@ -1238,26 +1303,33 @@ class MyScriber(rumps.App):
             try:
                 editable = self._focused_element_is_editable()
             except Exception as e:
-                log.warning(f"Editable check failed: {e} — will show overlay")
+                log.warning(f"Editable check failed: {e} — will copy to clipboard")
 
             if editable:
                 log.info("Editable field focused — pasting directly")
                 self._paste_to_cursor(text)
             else:
-                log.info("No editable field — showing overlay")
-                self._show_overlay(text)
+                # No editable field: copy to clipboard and notify
+                log.info("No editable field — copying to clipboard + notification")
+                self._last_transcribed_text = text
+                proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+                proc.communicate(text.encode("utf-8"))
+                # Notification with userInfo so clicking it opens the overlay
+                preview = text[:80] + ("…" if len(text) > 80 else "")
+                self._notify(
+                    "myScriber",
+                    preview,
+                    subtitle="Copied to clipboard — click to edit",
+                    user_info={"action": "show_overlay", "text": text},
+                )
         except Exception as e:
-            log.error(f"Deliver text error: {e} — falling back to overlay")
+            log.error(f"Deliver text error: {e} — copying to clipboard")
             try:
-                self._show_overlay(text)
+                proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+                proc.communicate(text.encode("utf-8"))
+                self._notify("myScriber", "Copied to clipboard!")
             except Exception:
-                # Last resort: clipboard
-                try:
-                    proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
-                    proc.communicate(text.encode("utf-8"))
-                    self._notify("myScriber", "Copied to clipboard!")
-                except Exception:
-                    pass
+                pass
 
     @staticmethod
     def _focused_element_is_editable():
