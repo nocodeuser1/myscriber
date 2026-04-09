@@ -879,14 +879,22 @@ class MyScriber(rumps.App):
         # "wait_for_up" prevents re-triggering from key-repeat events
         # after a safety stop fires while the key is still physically held.
         wait_for_up = {"active": False}
+        safety_timer = {"ref": None}  # track current safety timer
         app = self
 
         # Safety timer: auto-stop recording if key-up is missed (e.g. tap was
         # disabled by macOS timeout and key-up event was lost).
         MAX_RECORD_SECS = 120  # 2 minutes max
 
+        def _cancel_safety_timer():
+            """Cancel any active safety timer."""
+            if safety_timer["ref"]:
+                safety_timer["ref"].cancel()
+                safety_timer["ref"] = None
+
         def _safety_stop():
             """Called on main thread if recording exceeds MAX_RECORD_SECS."""
+            safety_timer["ref"] = None
             if pressed["down"] and app.recording:
                 log.warning("Safety timeout — stopping stuck recording")
                 pressed["down"] = False
@@ -911,6 +919,7 @@ class MyScriber(rumps.App):
                         mods = flags & 0x00FF0000
                         if (mods & mod_mask) != mod_mask:
                             pressed["down"] = False
+                            _cancel_safety_timer()
                             log.info("Modifier released — stop recording")
                             app._stop_and_transcribe()
                     return event
@@ -929,6 +938,7 @@ class MyScriber(rumps.App):
                         elif not pressed["down"]:
                             # First press — start recording
                             pressed["down"] = True
+                            _cancel_safety_timer()  # cancel any stale timer
                             log.info("Hotkey DOWN — start recording")
                             app._start_recording()
                             def _safety_timeout():
@@ -941,11 +951,13 @@ class MyScriber(rumps.App):
                             t = threading.Timer(MAX_RECORD_SECS, _safety_timeout)
                             t.daemon = True
                             t.start()
+                            safety_timer["ref"] = t
                         # else: key-repeat while held — ignore silently (no log)
                     else:  # kCGEventKeyUp
                         wait_for_up["active"] = False
                         if pressed["down"]:
                             pressed["down"] = False
+                            _cancel_safety_timer()
                             log.info("Hotkey UP — stop recording")
                             app._stop_and_transcribe()
                     # Suppress the hotkey event
