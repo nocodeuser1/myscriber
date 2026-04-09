@@ -158,7 +158,7 @@ try:
         """Custom NSView that draws a futuristic sound waveform with indigo-cyan gradient."""
 
         def initWithFrame_(self, frame):
-            self = super(_WaveformView, self).initWithFrame_(frame)
+            self = _objc.super(_WaveformView, self).initWithFrame_(frame)
             if self is None:
                 return None
             self._levels = [0.0] * 50  # 50 bars
@@ -240,58 +240,12 @@ try:
             except Exception:
                 pass
 
-    class _WaveformView_Metaclass(_objc.ObjCMeta):
-        pass
-
 except Exception as e:
+    log.error(f"Failed to define _WaveformView class: {e}")
     _WaveformView = None
 
 
-# ── ObjC OverlayTextView that intercepts Enter key ────────────────────────────
-try:
-    from AppKit import NSTextView
-    import objc as _objc
-
-    class _OverlayTextView(NSTextView):
-        """NSTextView subclass that wires Enter key to copy+close."""
-
-        def initWithFrame_(self, frame):
-            self = super(_OverlayTextView, self).initWithFrame_(frame)
-            if self is None:
-                return None
-            self._copy = None
-            return self
-
-        @_objc.python_method
-        def setup(self, copy_fn):
-            """Store the copy callback."""
-            self._copy = copy_fn
-
-        def keyDown_(self, event):
-            """Intercept Enter key; Shift+Enter inserts newline."""
-            try:
-                flags = event.modifierFlags()
-                has_shift = bool(flags & (1 << 17))  # Shift flag
-                keycode = event.keyCode()
-
-                # Enter/Return key has keycode 36, numpad enter is 76
-                if keycode in (36, 76):
-                    if has_shift:
-                        # Shift+Enter: insert a literal newline character
-                        self.insertText_("\n")
-                    else:
-                        # Enter (no Shift): call copy callback
-                        if self._copy:
-                            self._copy()
-                    return
-            except Exception:
-                pass
-
-            # All other keys: pass through to parent
-            super(_OverlayTextView, self).keyDown_(event)
-
-except Exception as e:
-    _OverlayTextView = None
+# _OverlayTextView removed — Enter/Shift+Enter handled via NSEvent local monitor
 
 
 class MyScriber(rumps.App):
@@ -1788,8 +1742,8 @@ class MyScriber(rumps.App):
             scroll.setAutoresizingMask_(2 | 16)  # width + height flexible
 
             cs = scroll.contentSize()
-            # Use _OverlayTextView to handle Enter key interception
-            tv = _OverlayTextView.alloc().initWithFrame_(
+            # Use standard NSTextView (created via NSScrollView's content size)
+            tv = NSTextView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, cs.width, cs.height)
             )
             tv.setFont_(NSFont.systemFontOfSize_(14))
@@ -1830,7 +1784,7 @@ class MyScriber(rumps.App):
             copy_btn.setTitle_("Copy to Clipboard")
             copy_btn.setBezelStyle_(NSBezelStyleRounded)
             copy_btn.setFont_(NSFont.boldSystemFontOfSize_(13))
-            # Don't set key equivalent here — Enter is now handled by _OverlayTextView
+            # Enter is handled by the NSEvent local monitor above
             bg.addSubview_(copy_btn)
 
             # Wire button actions using block-based approach
@@ -1845,8 +1799,33 @@ class MyScriber(rumps.App):
                     self._notify("myScriber", "Copied to clipboard!")
                 self._close_overlay()
 
-            # Wire Enter key in text view to copy function
-            tv.setup(_do_copy)
+            # Wire Enter key via NSEvent local monitor (intercepts key events)
+            from AppKit import NSEvent
+            try:
+                from AppKit import NSKeyDownMask
+            except ImportError:
+                NSKeyDownMask = 1 << 10  # NSEventMaskKeyDown
+            def _key_handler(event):
+                try:
+                    keycode = event.keyCode()
+                    if keycode in (36, 76):  # Return / numpad Enter
+                        flags = event.modifierFlags()
+                        has_shift = bool(flags & (1 << 17))  # NSShiftKeyMask
+                        if has_shift:
+                            # Shift+Enter: insert newline into text view
+                            if self._overlay_text_view:
+                                self._overlay_text_view.insertText_("\n")
+                            return None  # consume the event
+                        else:
+                            # Enter: copy to clipboard and close
+                            _do_copy()
+                            return None  # consume the event
+                except Exception as ex:
+                    log.warning(f"Overlay key handler error: {ex}")
+                return event  # pass through all other keys
+            self._overlay_key_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                NSKeyDownMask, _key_handler
+            )
 
             # Use module-level _OverlayBtnHelper (defined once to avoid
             # PyObjC crash from re-registering the same ObjC class name)
@@ -1873,6 +1852,14 @@ class MyScriber(rumps.App):
 
     def _close_overlay(self):
         """Dismiss the overlay panel."""
+        # Remove Enter key monitor
+        if getattr(self, '_overlay_key_monitor', None):
+            try:
+                from AppKit import NSEvent
+                NSEvent.removeMonitor_(self._overlay_key_monitor)
+            except Exception:
+                pass
+            self._overlay_key_monitor = None
         if self._overlay_panel:
             self._overlay_panel.orderOut_(None)
             self._overlay_panel = None
