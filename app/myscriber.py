@@ -157,8 +157,8 @@ try:
     class _WaveformView(NSView):
         """Custom NSView that draws a futuristic sound waveform with indigo-cyan gradient."""
 
-        def init(self):
-            self = super(_WaveformView, self).init()
+        def initWithFrame_(self, frame):
+            self = super(_WaveformView, self).initWithFrame_(frame)
             if self is None:
                 return None
             self._levels = [0.0] * 50  # 50 bars
@@ -255,8 +255,8 @@ try:
     class _OverlayTextView(NSTextView):
         """NSTextView subclass that wires Enter key to copy+close."""
 
-        def init(self):
-            self = super(_OverlayTextView, self).init()
+        def initWithFrame_(self, frame):
+            self = super(_OverlayTextView, self).initWithFrame_(frame)
             if self is None:
                 return None
             self._copy = None
@@ -274,11 +274,11 @@ try:
                 has_shift = bool(flags & (1 << 17))  # Shift flag
                 keycode = event.keyCode()
 
-                # Enter key has keycode 36
-                if keycode == 36:  # Return/Enter
+                # Enter/Return key has keycode 36, numpad enter is 76
+                if keycode in (36, 76):
                     if has_shift:
-                        # Shift+Enter: insert newline
-                        super(_OverlayTextView, self).keyDown_(event)
+                        # Shift+Enter: insert a literal newline character
+                        self.insertText_("\n")
                     else:
                         # Enter (no Shift): call copy callback
                         if self._copy:
@@ -437,48 +437,54 @@ class MyScriber(rumps.App):
         try:
             from AppKit import (
                 NSWindow, NSWindowStyleMaskBorderless, NSBackingStoreBuffered,
-                NSFloatingWindowLevel, NSColor, NSRect, NSSize, NSPoint,
-                NSApplication,
+                NSFloatingWindowLevel, NSColor, NSScreen,
+                NSMakeRect, NSMakeSize, NSMakePoint,
             )
-            from PyObjCTools import AppHelper
 
             if not _WaveformView:
+                log.warning("_WaveformView class not available — skipping waveform")
                 return
 
+            # Hide existing waveform if any
+            if self._waveform_window:
+                self._hide_waveform()
+
             # Create window: 500px wide, 60px tall
-            frame = NSRect(NSPoint(0, 0), NSSize(500, 60))
             window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-                frame, NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False
+                NSMakeRect(0, 0, 500, 60),
+                NSWindowStyleMaskBorderless,
+                NSBackingStoreBuffered,
+                False,
             )
-            window.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0, 0, 0, 0))
+            window.setBackgroundColor_(NSColor.clearColor())
             window.setOpaque_(False)
             window.setLevel_(NSFloatingWindowLevel)
             window.setHidesOnDeactivate_(False)
             window.setIgnoresMouseEvents_(True)
+            window.setCollectionBehavior_(1 << 0)  # NSWindowCollectionBehaviorCanJoinAllSpaces
 
-            # Set rounded corners
-            try:
-                window.setCornerRadius_(16)
-            except Exception:
-                pass
+            # Rounded corners via content view layer
+            cv = window.contentView()
+            cv.setWantsLayer_(True)
+            cv.layer().setCornerRadius_(16)
+            cv.layer().setMasksToBounds_(True)
 
             # Create and add waveform view
-            waveform = _WaveformView.alloc().initWithFrame_(frame)
+            waveform = _WaveformView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 60))
             window.setContentView_(waveform)
             self._waveform_view = waveform
             waveform._mode = "recording"
 
             # Position: centered horizontally, 40px from bottom
-            screen = NSApplication.sharedApplication().mainScreen()
+            screen = NSScreen.mainScreen()
             if screen:
-                screen_frame = screen.visibleFrame()
-                screen_w = screen_frame.size.width
-                window_x = (screen_w - 500) / 2.0
-                window_y = screen_frame.origin.y + 40
-                window.setFrameOrigin_(NSPoint(window_x, window_y))
+                sf = screen.visibleFrame()
+                window_x = sf.origin.x + (sf.size.width - 500) / 2.0
+                window_y = sf.origin.y + 40
+                window.setFrameOrigin_(NSMakePoint(window_x, window_y))
 
             self._waveform_window = window
-            window.makeKeyAndOrderFront_(None)
+            window.orderFrontRegardless()
             log.info("Waveform window shown")
         except Exception as e:
             log.warning(f"Could not show waveform: {e}")
