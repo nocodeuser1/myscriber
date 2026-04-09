@@ -346,11 +346,12 @@ class MyScriber(rumps.App):
     # ── Waveform window management (image-based) ─────────────────────────────
 
     _wave_images = []        # pre-loaded NSImages for volume levels 0-5
-    _wave_processing_img = None  # processing state image
+    _proc_frames = []        # pre-loaded processing animation frames
+    _proc_frame_idx = 0      # current frame index for animation
     _waveform_image_view = None  # NSImageView in the overlay window
 
     def _load_wave_images(self):
-        """Pre-load soundwave volume PNG icons for the waveform overlay."""
+        """Pre-load soundwave volume PNG icons and processing animation frames."""
         try:
             from AppKit import NSImage, NSSize
             for i in range(6):
@@ -364,14 +365,22 @@ class MyScriber(rumps.App):
                 elif normal.exists():
                     img = NSImage.alloc().initWithContentsOfFile_(str(normal))
                 self._wave_images.append(img)
-            # Processing image
-            retina_p = ASSETS_DIR / "wave_processing@2x.png"
-            if retina_p.exists():
-                img = NSImage.alloc().initWithContentsOfFile_(str(retina_p))
+            # Processing animation frames
+            for i in range(20):  # load up to 20 frames
+                retina = ASSETS_DIR / f"proc_{i}@2x.png"
+                normal = ASSETS_DIR / f"proc_{i}.png"
+                if not retina.exists() and not normal.exists():
+                    break
+                img = None
+                if retina.exists():
+                    img = NSImage.alloc().initWithContentsOfFile_(str(retina))
+                    if img:
+                        img.setSize_(NSSize(80, 36))
+                elif normal.exists():
+                    img = NSImage.alloc().initWithContentsOfFile_(str(normal))
                 if img:
-                    img.setSize_(NSSize(120, 40))
-                self._wave_processing_img = img
-            log.info(f"Loaded {len([i for i in self._wave_images if i])} wave images")
+                    self._proc_frames.append(img)
+            log.info(f"Loaded {len([i for i in self._wave_images if i])} wave images, {len(self._proc_frames)} processing frames")
         except Exception as e:
             log.warning(f"Could not load wave images: {e}")
 
@@ -448,15 +457,58 @@ class MyScriber(rumps.App):
         log.info("Waveform overlay hidden")
 
     def _set_waveform_processing(self):
-        """Switch waveform overlay to processing image."""
-        if not self._waveform_image_view:
+        """Switch overlay to smaller processing animation with pulsing dots."""
+        if not self._waveform_window:
             return
         try:
-            if self._wave_processing_img:
-                self._waveform_image_view.setImage_(self._wave_processing_img)
+            from AppKit import (
+                NSMakeRect, NSMakePoint, NSScreen, NSImageView,
+                NSImageScaleProportionallyUpOrDown,
+            )
+            from Foundation import NSTimer
+
+            if not self._proc_frames:
+                log.warning("No processing frames loaded")
+                return
+
+            # Resize window to smaller processing size (80x36 pt)
+            screen = NSScreen.mainScreen()
+            if screen:
+                sf = screen.visibleFrame()
+                new_x = sf.origin.x + (sf.size.width - 80) / 2.0
+                new_y = sf.origin.y + 30
+                self._waveform_window.setFrame_display_(
+                    NSMakeRect(new_x, new_y, 80, 36), True
+                )
+
+            # Replace image view content with first processing frame
+            iv = self._waveform_image_view
+            if iv:
+                iv.setFrame_(NSMakeRect(0, 0, 80, 36))
+                self._proc_frame_idx = 0
+                iv.setImage_(self._proc_frames[0])
+
+            # Start animation timer: cycle frames at ~10fps
+            if self._waveform_timer:
+                try:
+                    self._waveform_timer.invalidate()
+                except Exception:
+                    pass
+            self._waveform_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.1, self, "procAnimTick:", None, True
+            )
             log.info("Waveform switched to processing mode")
         except Exception as e:
             log.warning(f"Could not set waveform processing: {e}")
+
+    def procAnimTick_(self, timer):
+        """NSTimer callback: advance processing animation frame."""
+        try:
+            if self._waveform_image_view and self._proc_frames:
+                self._proc_frame_idx = (self._proc_frame_idx + 1) % len(self._proc_frames)
+                self._waveform_image_view.setImage_(self._proc_frames[self._proc_frame_idx])
+        except Exception:
+            pass
 
     def _update_waveform(self, rms):
         """Thread-safe update of waveform overlay image based on volume level.
@@ -464,7 +516,7 @@ class MyScriber(rumps.App):
         if not self._waveform_image_view or not self._wave_images:
             return
         now = time.time()
-        if now - self._last_waveform_update < 0.125:  # max 8 updates/sec
+        if now - self._last_waveform_update < 0.0625:  # max 16 updates/sec
             return
         self._last_waveform_update = now
         try:
