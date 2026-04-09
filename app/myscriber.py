@@ -365,7 +365,7 @@ class MyScriber(rumps.App):
                 elif normal.exists():
                     img = NSImage.alloc().initWithContentsOfFile_(str(normal))
                 self._wave_images.append(img)
-            # Processing animation frames
+            # Processing animation frames (half-size: 40x18 pt)
             for i in range(20):  # load up to 20 frames
                 retina = ASSETS_DIR / f"proc_{i}@2x.png"
                 normal = ASSETS_DIR / f"proc_{i}.png"
@@ -375,7 +375,7 @@ class MyScriber(rumps.App):
                 if retina.exists():
                     img = NSImage.alloc().initWithContentsOfFile_(str(retina))
                     if img:
-                        img.setSize_(NSSize(80, 36))
+                        img.setSize_(NSSize(40, 18))
                 elif normal.exists():
                     img = NSImage.alloc().initWithContentsOfFile_(str(normal))
                 if img:
@@ -471,20 +471,20 @@ class MyScriber(rumps.App):
                 log.warning("No processing frames loaded")
                 return
 
-            # Resize window to smaller processing size (80x36 pt)
+            # Resize window to smaller processing size (40x18 pt)
             screen = NSScreen.mainScreen()
             if screen:
                 sf = screen.visibleFrame()
-                new_x = sf.origin.x + (sf.size.width - 80) / 2.0
+                new_x = sf.origin.x + (sf.size.width - 40) / 2.0
                 new_y = sf.origin.y + 30
                 self._waveform_window.setFrame_display_(
-                    NSMakeRect(new_x, new_y, 80, 36), True
+                    NSMakeRect(new_x, new_y, 40, 18), True
                 )
 
             # Replace image view content with first processing frame
             iv = self._waveform_image_view
             if iv:
-                iv.setFrame_(NSMakeRect(0, 0, 80, 36))
+                iv.setFrame_(NSMakeRect(0, 0, 40, 18))
                 self._proc_frame_idx = 0
                 iv.setImage_(self._proc_frames[0])
 
@@ -894,15 +894,25 @@ class MyScriber(rumps.App):
                 app._stop_and_transcribe()
 
         def _tap_cb(proxy, etype, event, refcon):
+            # CRITICAL: This callback must be FAST.  macOS disables the
+            # event tap if the callback takes too long (~10 s budget).
+            # Avoid logging on key-repeat events; keep the hot path minimal.
             try:
                 # Re-enable tap if macOS disabled it (callback took too long)
                 if etype == Quartz.kCGEventTapDisabledByTimeout:
                     Quartz.CGEventTapEnable(app._event_tap, True)
-                    log.warning("kCGEventTapDisabledByTimeout: CGEventTap was disabled, re-enabled now")
-                    # Don't auto-stop recording here — the user may still
-                    # be holding the key.  The 2-min safety timer handles
-                    # truly stuck recordings.  Re-enabling the tap is
-                    # enough; we'll catch the real key-up event now.
+                    log.warning("CGEventTap re-enabled after macOS timeout")
+                    return event
+
+                # Handle modifier-only release (user lifts Cmd before L)
+                if etype == Quartz.kCGEventFlagsChanged:
+                    if pressed["down"]:
+                        flags = Quartz.CGEventGetFlags(event)
+                        mods = flags & 0x00FF0000
+                        if (mods & mod_mask) != mod_mask:
+                            pressed["down"] = False
+                            log.info("Modifier released — stop recording")
+                            app._stop_and_transcribe()
                     return event
 
                 if etype not in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
@@ -912,19 +922,15 @@ class MyScriber(rumps.App):
                 flags = Quartz.CGEventGetFlags(event)
                 mods = flags & 0x00FF0000  # isolate modifier bits
 
-                event_type_str = "KeyDown" if etype == Quartz.kCGEventKeyDown else "KeyUp"
-
                 if kc == keycode and (mods & mod_mask) == mod_mask:
-                    log.info(f"Hotkey {event_type_str}: keycode={kc}, flags=0x{flags:x}")
                     if etype == Quartz.kCGEventKeyDown:
-                        # Ignore key-repeat events after a safety stop
                         if wait_for_up["active"]:
-                            log.info("Hotkey KeyDown suppressed: wait_for_up is active")
-                            pass  # swallow repeats until real key-up
+                            pass  # swallow repeats after safety stop
                         elif not pressed["down"]:
+                            # First press — start recording
                             pressed["down"] = True
+                            log.info("Hotkey DOWN — start recording")
                             app._start_recording()
-                            # Start safety timer in case key-up is lost
                             def _safety_timeout():
                                 if pressed["down"] and app.recording:
                                     try:
@@ -935,28 +941,19 @@ class MyScriber(rumps.App):
                             t = threading.Timer(MAX_RECORD_SECS, _safety_timeout)
                             t.daemon = True
                             t.start()
+                        # else: key-repeat while held — ignore silently (no log)
                     else:  # kCGEventKeyUp
-                        wait_for_up["active"] = False  # real key-up clears the lock
+                        wait_for_up["active"] = False
                         if pressed["down"]:
                             pressed["down"] = False
+                            log.info("Hotkey UP — stop recording")
                             app._stop_and_transcribe()
-                    # Suppress by converting to a null event type.
-                    # NEVER return None — PyObjC bridges that to NULL
-                    # which segfaults CoreGraphics.
+                    # Suppress the hotkey event
                     try:
                         Quartz.CGEventSetType(event, kCGEventNull)
-                        log.info(f"Hotkey {event_type_str} suppressed (converted to null)")
                     except Exception:
-                        log.warning(f"Could not suppress hotkey {event_type_str}")
+                        pass
                     return event
-
-                # Also check for modifier-only key-up (user released modifier
-                # before releasing the trigger key).  If our hotkey modifier
-                # is no longer held, treat it as a release.
-                if pressed["down"] and (mods & mod_mask) != mod_mask:
-                    log.info(f"Modifier released: mods=0x{mods:x}, required=0x{mod_mask:x}")
-                    pressed["down"] = False
-                    app._stop_and_transcribe()
 
             except Exception as e:
                 log.error(f"CGEventTap callback error: {e}")
@@ -968,6 +965,7 @@ class MyScriber(rumps.App):
         event_mask = (
             Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
             | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged)
         )
         tap = Quartz.CGEventTapCreate(
             Quartz.kCGHIDEventTap,
