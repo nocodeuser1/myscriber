@@ -331,16 +331,8 @@ else:
 # Volume-level menubar icons (indigo fill-from-bottom inside black outline)
 print("Generating indigo volume icons...")
 
-# Level 0 = black template (idle). Levels 1-5 = indigo filling from bottom.
-import shutil as _shutil
-for sz, suffix in [(18, ""), (36, "@2x")]:
-    # Level 0: copy the black template icon (normal resting state)
-    src = ASSETS / f"mic_template{suffix}.png"
-    dst = ASSETS / f"mic_vol_0{suffix}.png"
-    _shutil.copy2(src, dst)
-    print(f"  {dst}")
-
-for lvl in range(1, 6):
+# Level 0 = hollow outline (no fill). Levels 1-5 = indigo filling from bottom.
+for lvl in range(0, 6):
     fill = lvl / 5.0
     for sz, suffix in [(18, ""), (36, "@2x")]:
         px = draw_menubar_volume(sz, fill)
