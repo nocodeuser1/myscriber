@@ -90,7 +90,7 @@ MLX_MODEL_MAP = {
     "large-v3": "mlx-community/whisper-large-v3-mlx",
 }
 
-APP_VERSION  = "1.0.0"
+APP_VERSION  = "1.0.26"
 GITHUB_REPO  = "nocodeuser1/myscriber"  # GitHub repo (private)
 UPDATE_URL   = "https://gist.githubusercontent.com/nocodeuser1/19ae5cbd0057f2f7a3b04ac2f667118f/raw/version.json"
 
@@ -935,7 +935,12 @@ class MyScriber(rumps.App):
                             pressed["down"] = False
                             _cancel_safety_timer()
                             log.info("Modifier released — stop recording")
-                            app._stop_and_transcribe()
+                            # Dispatch off the CGEventTap callback to avoid deadlock
+                            try:
+                                from PyObjCTools import AppHelper
+                                AppHelper.callAfter(app._stop_and_transcribe)
+                            except Exception:
+                                app._stop_and_transcribe()
                     return event
 
                 if etype not in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
@@ -973,7 +978,12 @@ class MyScriber(rumps.App):
                             pressed["down"] = False
                             _cancel_safety_timer()
                             log.info("Hotkey UP — stop recording")
-                            app._stop_and_transcribe()
+                            # Dispatch off the CGEventTap callback to avoid deadlock
+                            try:
+                                from PyObjCTools import AppHelper
+                                AppHelper.callAfter(app._stop_and_transcribe)
+                            except Exception:
+                                app._stop_and_transcribe()
                     # Suppress the hotkey event
                     try:
                         Quartz.CGEventSetType(event, kCGEventNull)
@@ -1249,9 +1259,13 @@ class MyScriber(rumps.App):
         self.recording = False
         self._last_vol_level = -1
         if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception as e:
+                log.warning(f"Error stopping audio stream: {e}")
+            finally:
+                self.stream = None
 
         log.info(f"Recording STOPPED, starting transcription (thread={threading.current_thread().name})")
 
