@@ -95,6 +95,11 @@ else:
 "
 fi
 
+# Push latest changes to GitHub
+echo "Pushing to GitHub..."
+git add -A && git commit -m "Update via update.command" 2>/dev/null || true
+git push 2>/dev/null && echo "✓ Pushed to GitHub" || echo "⚠ Git push failed — you may need to push manually"
+
 # Relaunch
 echo "Launching myScriber..."
 open /Applications/myScriber.app
