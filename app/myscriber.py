@@ -605,6 +605,12 @@ class MyScriber(rumps.App):
                 notif.setActionButtonTitle_("Open Editor")
                 log.info(f"Delivering clickable notification with userInfo: {user_info}")
             center = NSUserNotificationCenter.defaultUserNotificationCenter()
+            # Re-assert our delegate — rumps/NSApp can overwrite it after init
+            if user_info and self._notif_delegate:
+                current = center.delegate()
+                if current is not self._notif_delegate:
+                    log.info(f"Notification delegate was {current}, re-setting to ours")
+                    center.setDelegate_(self._notif_delegate)
             center.deliverNotification_(notif)
             log.info(f"Notification delivered via NSUserNotification (delegate={center.delegate()})")
         except Exception as e:
