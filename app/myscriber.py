@@ -1547,6 +1547,11 @@ class MyScriber(rumps.App):
                     "AXSearchField", "AXWebArea",
                 }
 
+                # Log diagnostic info for debugging editable detection
+                bundle_id = front_app.bundleIdentifier() or ""
+                app_name = front_app.localizedName() or ""
+                log.info(f"Editable check: app={app_name} bundle={bundle_id} pid={pid}")
+
                 # ── Check 1: AXRole ──
                 role_ptr = ctypes.c_void_p()
                 err = hi.AXUIElementCopyAttributeValue(focused, attr_role, ctypes.byref(role_ptr))
@@ -1554,17 +1559,23 @@ class MyScriber(rumps.App):
                 if err == 0 and role_ptr.value:
                     _track(role_ptr.value)
                     role = _read_cfstr(role_ptr.value)
-                if role in editable_roles:
-                    return True
 
-                # ── Check 2: AXSubrole (catches contenteditable in Electron/web apps) ──
+                # ── Check 1b: AXSubrole ──
                 subrole_ptr = ctypes.c_void_p()
+                subrole = None
                 err = hi.AXUIElementCopyAttributeValue(focused, attr_subrole, ctypes.byref(subrole_ptr))
                 if err == 0 and subrole_ptr.value:
                     _track(subrole_ptr.value)
                     subrole = _read_cfstr(subrole_ptr.value)
-                    if subrole in ("AXContentEditable", "AXTextEntry"):
-                        return True
+
+                log.info(f"Editable check: role={role} subrole={subrole}")
+
+                if role in editable_roles:
+                    return True
+
+                # ── Check 2: AXSubrole (catches contenteditable in Electron/web apps) ──
+                if subrole in ("AXContentEditable", "AXTextEntry"):
+                    return True
 
                 # ── Check 3: AXSelectedText attribute exists (text-editing marker) ──
                 selected_ptr = ctypes.c_void_p()
@@ -1635,8 +1646,9 @@ class MyScriber(rumps.App):
                         return True
 
                 # ── Check 7: Electron/browser app heuristic ──
-                bundle_id = front_app.bundleIdentifier() or ""
+                # bundle_id already read at top of function
                 electron_ids = {
+                    "com.anthropic.claude",
                     "com.anthropic.claudedesktop",
                     "com.electron.",
                     "com.microsoft.VSCode",
@@ -1647,6 +1659,7 @@ class MyScriber(rumps.App):
                     "com.notion.id",
                     "com.linear",
                 }
+                log.info(f"Editable check 7: bundle_id={bundle_id}")
                 for eid in electron_ids:
                     if bundle_id == eid or bundle_id.startswith(eid):
                         log.info(f"Electron/browser heuristic match: {bundle_id}")
