@@ -136,16 +136,17 @@ def draw_wave_mask(w, h, fill_level):
 # ── Wave edge highlights ──────────────────────────────────────────────────
 
 def draw_wave_edge(w, h, fill_level):
-    """Bright edge highlights that define the glass shape.
+    """Glass bar rendering with bright edges and visible interior.
 
-    - Top/upper edges are brightest (catching light from above)
-    - Sides have moderate brightness
-    - Bottom edges are dimmer
-    - When volume increases, indigo fills from bottom inside the bars
+    Each bar has:
+    - Bold bright edge stroke (top-lit, brighter on top half)
+    - Semi-transparent white interior fill (glass body, ~20%)
+    - Indigo fill rising from bottom when volume > 0
+    - Outer glow for visibility on any background
     """
     pixels = []
-    # Edge stroke width in normalized coords
-    stroke_w = 1.4 / w  # ~1.4 pixels
+    stroke_w = 2.2 / w   # bold edge stroke (~2.2 pixels)
+    glow_w = 4.5 / w     # outer glow radius
 
     for py in range(h):
         for px in range(w):
@@ -153,9 +154,11 @@ def draw_wave_edge(w, h, fill_level):
             ny = (py + 0.5) / h
 
             best_edge = 0.0
-            best_fill = 0.0
+            best_glow = 0.0
+            best_inside = 0.0
             best_is_top = False
-            best_ny_ratio = 0.5  # where in bar vertically (0=top, 1=bottom)
+            best_ny_ratio = 0.5
+            best_in_fill_zone = False
 
             for i in range(NUM_BARS):
                 d = bar_sdf(nx, ny, i)
@@ -163,64 +166,70 @@ def draw_wave_edge(w, h, fill_level):
                 bar_top = 0.5 - bh * 0.45
                 bar_bot = 0.5 + bh * 0.45
 
-                # Edge highlight: bright at the boundary
+                # Bold edge stroke
                 edge_alpha = clamp(1.0 - abs(d) / stroke_w)
 
-                # Interior fill (very subtle glass tint)
-                interior = clamp(0.5 - d * w) * 0.06  # 6% opacity fill
+                # Outer glow (soft falloff outside the bar)
+                if d > 0:
+                    glow_alpha = clamp(1.0 - d / glow_w) * 0.35
+                else:
+                    glow_alpha = 0.0
+
+                # Inside fill
+                inside_alpha = clamp(0.5 - d * w)
 
                 if edge_alpha > best_edge:
                     best_edge = edge_alpha
-                    # How far down in the bar (0=top, 1=bottom)
                     if bar_bot > bar_top:
                         best_ny_ratio = clamp((ny - bar_top) / (bar_bot - bar_top))
                     best_is_top = ny < (bar_top + bar_bot) / 2.0
 
-                if interior > best_fill:
-                    best_fill = interior
-                    # Volume fill: indigo from bottom
-                    fill_threshold = 1.0 - fill_level
-                    if bar_bot > bar_top:
-                        bar_ratio = clamp((ny - bar_top) / (bar_bot - bar_top))
-                    else:
-                        bar_ratio = 0.5
+                if glow_alpha > best_glow:
+                    best_glow = glow_alpha
+
+                if inside_alpha > best_inside:
+                    best_inside = inside_alpha
+                    # Check if in volume fill zone
+                    fill_threshold_y = bar_bot - (bar_bot - bar_top) * fill_level
+                    best_in_fill_zone = (ny >= fill_threshold_y and fill_level > 0)
 
             r, g, b, a = 0, 0, 0, 0
 
             if best_edge > 0.01:
-                # Directional lighting: top edges bright, bottom dimmer
-                # This gives the "catching light" effect from the reference
+                # Top-lit directional lighting
                 if best_is_top:
-                    brightness = 0.95 - best_ny_ratio * 0.3  # bright at top
+                    brightness = 1.0 - best_ny_ratio * 0.25
                 else:
-                    brightness = 0.65 - (best_ny_ratio - 0.5) * 0.3  # dimmer at bottom
+                    brightness = 0.75 - (best_ny_ratio - 0.5) * 0.25
 
-                brightness = clamp(brightness, 0.3, 1.0)
-                edge_opacity = best_edge * brightness
+                brightness = clamp(brightness, 0.45, 1.0)
 
-                r = int(255 * brightness)
-                g = int(255 * brightness)
-                b = int(255 * brightness)
-                a = int(clamp(edge_opacity) * 255)
+                if best_in_fill_zone:
+                    # Edge in fill zone: bright indigo-white mix
+                    mix = 0.4  # 40% indigo tint
+                    r = int((IND_R * mix + 255 * (1 - mix)) * brightness)
+                    g = int((IND_G * mix + 255 * (1 - mix)) * brightness)
+                    b = int((IND_B * mix + 255 * (1 - mix)) * brightness)
+                else:
+                    r = int(255 * brightness)
+                    g = int(255 * brightness)
+                    b = int(255 * brightness)
+                a = int(clamp(best_edge * brightness) * 255)
 
-            elif best_fill > 0.01:
-                # Subtle interior: check if volume-filled
-                for i in range(NUM_BARS):
-                    d = bar_sdf(nx, ny, i)
-                    if d < 0:  # inside bar
-                        bh = BAR_HEIGHTS[i]
-                        bar_top = 0.5 - bh * 0.45
-                        bar_bot = 0.5 + bh * 0.45
-                        fill_threshold_y = bar_bot - (bar_bot - bar_top) * fill_level
-                        if ny >= fill_threshold_y and fill_level > 0:
-                            # Indigo fill zone
-                            r, g, b = IND_R, IND_G, IND_B
-                            a = int(clamp(best_fill * 4) * 255)  # stronger in fill zone
-                        else:
-                            # Subtle white glass tint
-                            r, g, b = 255, 255, 255
-                            a = int(clamp(best_fill) * 255)
-                        break
+            elif best_inside > 0.01:
+                if best_in_fill_zone:
+                    # Visible indigo fill inside bars
+                    r, g, b = IND_R, IND_G, IND_B
+                    a = int(clamp(best_inside * 0.55) * 255)
+                else:
+                    # Glass body: semi-transparent white
+                    r, g, b = 255, 255, 255
+                    a = int(clamp(best_inside * 0.18) * 255)
+
+            elif best_glow > 0.01:
+                # Outer glow: soft white halo
+                r, g, b = 220, 220, 235
+                a = int(clamp(best_glow) * 255)
 
             pixels.append((r, g, b, a))
     return pixels
@@ -258,7 +267,7 @@ def draw_proc_mask(w, h, frame, total_frames=12):
 
 
 def draw_proc_edge(w, h, frame, total_frames=12):
-    """Bright edge highlights for processing dots."""
+    """Bold glass processing dots with edge highlights and indigo fill."""
     pixels = []
     num_dots = 3
     dot_radius = min(w, h) * 0.22
@@ -266,12 +275,13 @@ def draw_proc_edge(w, h, frame, total_frames=12):
     start_x = w / 2.0 - (num_dots - 1) * dot_spacing / 2.0
     cy = h / 2.0
     phase_offset = [0, 0.33, 0.66]
-    stroke_w = 1.2  # pixels
+    stroke_w = 2.0  # pixels — bold edge
 
     for py in range(h):
         for px in range(w):
             best_edge = 0.0
             best_fill = 0.0
+            best_glow = 0.0
             best_top = False
 
             for i in range(num_dots):
@@ -283,22 +293,28 @@ def draw_proc_edge(w, h, frame, total_frames=12):
 
                 dist = math.sqrt((px + 0.5 - cx) ** 2 + (py + 0.5 - cy) ** 2)
                 edge = clamp(1.0 - abs(dist - r) / stroke_w) * opacity
-                fill = clamp(r - dist + 0.5) * 0.06 * opacity
+                fill = clamp(r - dist + 0.5) * opacity
+                glow = clamp(1.0 - max(0, dist - r) / 3.0) * 0.25 * opacity
 
                 if edge > best_edge:
                     best_edge = edge
                     best_top = (py + 0.5) < cy
                 if fill > best_fill:
                     best_fill = fill
+                if glow > best_glow:
+                    best_glow = glow
 
             if best_edge > 0.01:
-                brightness = 0.9 if best_top else 0.55
+                brightness = 1.0 if best_top else 0.65
                 rv = int(255 * brightness)
                 a = int(clamp(best_edge * brightness) * 255)
                 pixels.append((rv, rv, rv, a))
             elif best_fill > 0.01:
-                # Subtle indigo tint for dots
-                a = int(clamp(best_fill) * 255)
+                # Indigo glass fill
+                a = int(clamp(best_fill * 0.45) * 255)
+                pixels.append((IND_R, IND_G, IND_B, a))
+            elif best_glow > 0.01:
+                a = int(clamp(best_glow) * 255)
                 pixels.append((IND_R, IND_G, IND_B, a))
             else:
                 pixels.append((0, 0, 0, 0))

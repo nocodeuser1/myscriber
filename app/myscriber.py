@@ -571,8 +571,10 @@ class MyScriber(rumps.App):
         except Exception:
             pass
 
+    _last_wave_level = -1  # separate from _last_vol_level (used by menubar icon)
+
     def _update_waveform(self, rms):
-        """Thread-safe update of waveform overlay (mask + edge) based on volume.
+        """Thread-safe update of waveform overlay edge image based on volume.
         Throttled to ~16 fps to avoid flooding the main thread with callAfter."""
         if not self._waveform_image_view:
             return
@@ -587,9 +589,9 @@ class MyScriber(rumps.App):
                 level = max(1, min(int((db + 54) / 8), 5))
             else:
                 level = 0
-            if level == self._last_vol_level:
+            if level == self._last_wave_level:
                 return
-            self._last_vol_level = level
+            self._last_wave_level = level
 
             edge = self._wave_edges[level] if level < len(self._wave_edges) else None
             if edge:
