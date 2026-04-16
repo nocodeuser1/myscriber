@@ -359,6 +359,10 @@ class MyScriber(rumps.App):
     _proc_frame_idx = 0      # current frame index for animation
     _waveform_image_view = None  # NSImageView in the overlay window
 
+    # Overlay sizes (pt) — wave is 96x32, processing is 32x14
+    WAVE_W, WAVE_H = 96, 32
+    PROC_W, PROC_H = 32, 14
+
     def _load_wave_images(self):
         """Pre-load soundwave volume PNG icons and processing animation frames."""
         try:
@@ -370,11 +374,11 @@ class MyScriber(rumps.App):
                 if retina.exists():
                     img = NSImage.alloc().initWithContentsOfFile_(str(retina))
                     if img:
-                        img.setSize_(NSSize(120, 40))  # retina renders at 2x
+                        img.setSize_(NSSize(self.WAVE_W, self.WAVE_H))
                 elif normal.exists():
                     img = NSImage.alloc().initWithContentsOfFile_(str(normal))
                 self._wave_images.append(img)
-            # Processing animation frames (half-size: 40x18 pt)
+            # Processing animation frames
             for i in range(20):  # load up to 20 frames
                 retina = ASSETS_DIR / f"proc_{i}@2x.png"
                 normal = ASSETS_DIR / f"proc_{i}.png"
@@ -384,7 +388,7 @@ class MyScriber(rumps.App):
                 if retina.exists():
                     img = NSImage.alloc().initWithContentsOfFile_(str(retina))
                     if img:
-                        img.setSize_(NSSize(40, 18))
+                        img.setSize_(NSSize(self.PROC_W, self.PROC_H))
                 elif normal.exists():
                     img = NSImage.alloc().initWithContentsOfFile_(str(normal))
                 if img:
@@ -394,12 +398,13 @@ class MyScriber(rumps.App):
             log.warning(f"Could not load wave images: {e}")
 
     def _show_waveform(self):
-        """Create and show a small borderless waveform overlay at bottom center."""
+        """Create and show a glassmorphic waveform overlay at bottom center."""
         try:
             from AppKit import (
                 NSWindow, NSWindowStyleMaskBorderless, NSBackingStoreBuffered,
                 NSFloatingWindowLevel, NSColor, NSScreen, NSImageView,
                 NSMakeRect, NSMakePoint, NSImageScaleProportionallyUpOrDown,
+                NSVisualEffectView, NSView, NSBezierPath,
             )
 
             if not self._wave_images or not any(self._wave_images):
@@ -412,9 +417,14 @@ class MyScriber(rumps.App):
             if self._waveform_window:
                 self._hide_waveform()
 
-            # Small window: 120x40 pt
+            W, H = self.WAVE_W, self.WAVE_H
+            # Add padding around the wave image for the glass backdrop
+            PAD_X, PAD_Y = 16, 10
+            WIN_W = W + PAD_X * 2
+            WIN_H = H + PAD_Y * 2
+
             window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-                NSMakeRect(0, 0, 120, 40),
+                NSMakeRect(0, 0, WIN_W, WIN_H),
                 NSWindowStyleMaskBorderless,
                 NSBackingStoreBuffered,
                 False,
@@ -426,19 +436,36 @@ class MyScriber(rumps.App):
             window.setIgnoresMouseEvents_(True)
             window.setCollectionBehavior_(1 << 0)  # NSWindowCollectionBehaviorCanJoinAllSpaces
 
-            # Image view fills window
-            iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 40))
+            # Glassmorphic backdrop: frosted blur + rounded corners + subtle border
+            blur = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+            blur.setMaterial_(13)  # NSVisualEffectMaterialHUDWindow — glass-like
+            blur.setBlendingMode_(1)  # behindWindow
+            blur.setState_(1)  # active
+            blur.setWantsLayer_(True)
+            blur.layer().setCornerRadius_(14.0)
+            blur.layer().setMasksToBounds_(True)
+            # Subtle light border for glass edge
+            blur.layer().setBorderWidth_(0.5)
+            blur.layer().setBorderColor_(
+                NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.2).CGColor()
+            )
+
+            # Image view centered on top of blur
+            iv = NSImageView.alloc().initWithFrame_(NSMakeRect(PAD_X, PAD_Y, W, H))
             iv.setImageScaling_(NSImageScaleProportionallyUpOrDown)
             if self._wave_images[0]:
                 iv.setImage_(self._wave_images[0])
-            window.setContentView_(iv)
+
+            blur.addSubview_(iv)
+            window.setContentView_(blur)
             self._waveform_image_view = iv
+            self._waveform_blur_view = blur  # keep reference
 
             # Position: centered horizontally, 30px from bottom
             screen = NSScreen.mainScreen()
             if screen:
                 sf = screen.visibleFrame()
-                window_x = sf.origin.x + (sf.size.width - 120) / 2.0
+                window_x = sf.origin.x + (sf.size.width - WIN_W) / 2.0
                 window_y = sf.origin.y + 30
                 window.setFrameOrigin_(NSMakePoint(window_x, window_y))
 
