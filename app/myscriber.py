@@ -227,7 +227,12 @@ class MyScriber(rumps.App):
         self._waveform_window = None
         self._waveform_image_view = None
         self._waveform_blur_view = None
+        self._waveform_mask_layer = None
         self._waveform_timer = None
+        self._wave_masks = []
+        self._wave_edges = []
+        self._proc_masks = []
+        self._proc_edges = []
         self._hotkey_health_timer = None
         self._last_transcribed_text = ""  # for notification click → overlay
         self._notif_delegate = None
@@ -365,73 +370,93 @@ class MyScriber(rumps.App):
     PROC_W, PROC_H = 32, 14
 
     def _load_wave_images(self):
-        """Pre-load soundwave volume PNG icons and processing animation frames."""
+        """Pre-load glassmorphic wave assets: mask images (for blur masking)
+        and edge highlight images (bright outlines layered on top).
+        Also loads processing animation mask+edge pairs."""
         try:
             from AppKit import NSImage, NSSize
+
+            # Wave: pairs of (mask, edge) per volume level
+            self._wave_masks = []
+            self._wave_edges = []
             for i in range(6):
-                retina = ASSETS_DIR / f"wave_vol_{i}@2x.png"
-                normal = ASSETS_DIR / f"wave_vol_{i}.png"
-                img = None
-                if retina.exists():
-                    img = NSImage.alloc().initWithContentsOfFile_(str(retina))
-                    if img:
-                        img.setSize_(NSSize(self.WAVE_W, self.WAVE_H))
-                elif normal.exists():
-                    img = NSImage.alloc().initWithContentsOfFile_(str(normal))
-                self._wave_images.append(img)
-            # Processing animation frames
-            for i in range(20):  # load up to 20 frames
-                retina = ASSETS_DIR / f"proc_{i}@2x.png"
-                normal = ASSETS_DIR / f"proc_{i}.png"
-                if not retina.exists() and not normal.exists():
+                for lst, prefix in [(self._wave_masks, "wave_mask_"), (self._wave_edges, "wave_edge_")]:
+                    retina = ASSETS_DIR / f"{prefix}{i}@2x.png"
+                    normal = ASSETS_DIR / f"{prefix}{i}.png"
+                    img = None
+                    if retina.exists():
+                        img = NSImage.alloc().initWithContentsOfFile_(str(retina))
+                        if img:
+                            img.setSize_(NSSize(self.WAVE_W, self.WAVE_H))
+                    elif normal.exists():
+                        img = NSImage.alloc().initWithContentsOfFile_(str(normal))
+                    lst.append(img)
+
+                # Backward compat: _wave_images still used by _update_waveform
+                self._wave_images.append(self._wave_edges[i] if i < len(self._wave_edges) else None)
+
+            # Processing: pairs of (mask, edge) per frame
+            self._proc_masks = []
+            self._proc_edges = []
+            for i in range(20):
+                retina_m = ASSETS_DIR / f"proc_mask_{i}@2x.png"
+                retina_e = ASSETS_DIR / f"proc_edge_{i}@2x.png"
+                normal_m = ASSETS_DIR / f"proc_mask_{i}.png"
+                normal_e = ASSETS_DIR / f"proc_edge_{i}.png"
+                if not retina_m.exists() and not normal_m.exists():
                     break
-                img = None
-                if retina.exists():
-                    img = NSImage.alloc().initWithContentsOfFile_(str(retina))
-                    if img:
-                        img.setSize_(NSSize(self.PROC_W, self.PROC_H))
-                elif normal.exists():
-                    img = NSImage.alloc().initWithContentsOfFile_(str(normal))
-                if img:
-                    self._proc_frames.append(img)
-            log.info(f"Loaded {len([i for i in self._wave_images if i])} wave images, {len(self._proc_frames)} processing frames")
+                for lst, rp, np_ in [(self._proc_masks, retina_m, normal_m),
+                                     (self._proc_edges, retina_e, normal_e)]:
+                    img = None
+                    if rp.exists():
+                        img = NSImage.alloc().initWithContentsOfFile_(str(rp))
+                        if img:
+                            img.setSize_(NSSize(self.PROC_W, self.PROC_H))
+                    elif np_.exists():
+                        img = NSImage.alloc().initWithContentsOfFile_(str(np_))
+                    lst.append(img)
+
+                # Backward compat
+                if i < len(self._proc_edges):
+                    self._proc_frames.append(self._proc_edges[i])
+
+            log.info(f"Loaded {len(self._wave_masks)} wave mask/edge pairs, "
+                     f"{len(self._proc_masks)} proc mask/edge pairs")
         except Exception as e:
             log.warning(f"Could not load wave images: {e}")
 
     def _show_waveform(self):
-        """Create and show a glassmorphic waveform overlay at bottom center.
+        """Create and show an Apple-style glassmorphic waveform overlay.
 
-        Uses Apple-style glassmorphism: semi-transparent tinted background
-        with system vibrancy, visible border, and drop shadow. Looks great
-        on both light and dark backgrounds.
+        Inspired by the iOS lock screen clock: the shapes themselves are
+        glass — the background refracts through them via a masked blur,
+        and thin bright edge highlights define the shape boundaries.
+        No opaque container. Two layers:
+          1. NSVisualEffectView masked to the bar silhouettes (refraction)
+          2. NSImageView with edge highlight overlay (luminous outlines)
         """
         try:
             from AppKit import (
                 NSWindow, NSWindowStyleMaskBorderless, NSBackingStoreBuffered,
                 NSFloatingWindowLevel, NSColor, NSScreen, NSImageView,
-                NSMakeRect, NSMakePoint, NSMakeSize, NSImageScaleProportionallyUpOrDown,
-                NSVisualEffectView, NSView, NSShadow,
+                NSMakeRect, NSMakePoint, NSImageScaleProportionallyUpOrDown,
+                NSVisualEffectView, NSView,
             )
             import Quartz
 
-            if not self._wave_images or not any(self._wave_images):
+            if not self._wave_masks:
                 self._load_wave_images()
-            if not self._wave_images or not any(self._wave_images):
-                log.warning("Wave images not available — skipping waveform")
+            if not self._wave_masks or not any(self._wave_masks):
+                log.warning("Wave mask images not available — skipping waveform")
                 return
 
-            # Hide existing waveform if any
             if self._waveform_window:
                 self._hide_waveform()
 
             W, H = self.WAVE_W, self.WAVE_H
-            PAD_X, PAD_Y = 16, 10
-            WIN_W = W + PAD_X * 2
-            WIN_H = H + PAD_Y * 2
-            CORNER_R = 14.0
 
             window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-                NSMakeRect(0, 0, WIN_W, WIN_H),
+                NSMakeRect(0, 0, W, H),
                 NSWindowStyleMaskBorderless,
                 NSBackingStoreBuffered,
                 False,
@@ -441,74 +466,44 @@ class MyScriber(rumps.App):
             window.setLevel_(NSFloatingWindowLevel)
             window.setHidesOnDeactivate_(False)
             window.setIgnoresMouseEvents_(True)
-            window.setCollectionBehavior_(1 << 0)  # canJoinAllSpaces
-            window.setHasShadow_(True)
+            window.setCollectionBehavior_(1 << 0)
 
-            # Container view with layer for shadow + clipping
-            container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+            # Container
+            container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
             container.setWantsLayer_(True)
-            container.layer().setCornerRadius_(CORNER_R)
-            container.layer().setMasksToBounds_(False)
-            # Drop shadow — ensures visibility on light backgrounds
-            container.layer().setShadowOpacity_(0.25)
-            container.layer().setShadowRadius_(12.0)
-            container.layer().setShadowOffset_(Quartz.CGSizeMake(0, -2))
-            container.layer().setShadowColor_(
-                NSColor.blackColor().CGColor()
-            )
 
-            # Vibrancy layer: system blur that adapts to light/dark mode
-            blur = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
-            blur.setMaterial_(13)  # HUDWindow — dark translucent glass
+            # Layer 1: Blur (refraction) masked to bar shapes
+            blur = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
+            blur.setMaterial_(14)  # NSVisualEffectMaterialFullScreenUI — bright glass
             blur.setBlendingMode_(1)  # behindWindow
             blur.setState_(1)  # active
             blur.setWantsLayer_(True)
-            blur.layer().setCornerRadius_(CORNER_R)
-            blur.layer().setMasksToBounds_(True)
+            # Mask the blur to the bar silhouettes
+            if self._wave_masks[0]:
+                mask_layer = Quartz.CALayer.layer()
+                mask_layer.setFrame_(Quartz.CGRectMake(0, 0, W, H))
+                mask_layer.setContents_(self._wave_masks[0].CGImageForProposedRect_context_hints_(None, None, None))
+                blur.layer().setMask_(mask_layer)
 
-            # Tinted overlay — semi-transparent dark layer ensures the glass
-            # is always visible even on pure white backgrounds (Apple style)
-            tint = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
-            tint.setWantsLayer_(True)
-            tint.layer().setBackgroundColor_(
-                NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    0.08, 0.06, 0.14, 0.55  # dark indigo-tinted, 55% opacity
-                ).CGColor()
-            )
-            tint.layer().setCornerRadius_(CORNER_R)
-            tint.layer().setMasksToBounds_(True)
+            # Layer 2: Edge highlights (luminous outlines on top)
+            edge_iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
+            edge_iv.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+            if self._wave_edges and self._wave_edges[0]:
+                edge_iv.setImage_(self._wave_edges[0])
 
-            # Visible border — thin bright line for glass edge definition
-            tint.layer().setBorderWidth_(0.75)
-            tint.layer().setBorderColor_(
-                NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.18).CGColor()
-            )
-
-            # Inner glow: second border layer for depth
-            blur.layer().setBorderWidth_(0.5)
-            blur.layer().setBorderColor_(
-                NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.08).CGColor()
-            )
-
-            # Image view on top
-            iv = NSImageView.alloc().initWithFrame_(NSMakeRect(PAD_X, PAD_Y, W, H))
-            iv.setImageScaling_(NSImageScaleProportionallyUpOrDown)
-            if self._wave_images[0]:
-                iv.setImage_(self._wave_images[0])
-
-            # Layer stack: container > blur > tint > image
-            blur.addSubview_(tint)
-            blur.addSubview_(iv)
             container.addSubview_(blur)
+            container.addSubview_(edge_iv)
             window.setContentView_(container)
-            self._waveform_image_view = iv
+
+            self._waveform_image_view = edge_iv
             self._waveform_blur_view = blur
+            self._waveform_mask_layer = mask_layer if self._wave_masks[0] else None
 
             # Position: centered horizontally, 30px from bottom
             screen = NSScreen.mainScreen()
             if screen:
                 sf = screen.visibleFrame()
-                window_x = sf.origin.x + (sf.size.width - WIN_W) / 2.0
+                window_x = sf.origin.x + (sf.size.width - W) / 2.0
                 window_y = sf.origin.y + 30
                 window.setFrameOrigin_(NSMakePoint(window_x, window_y))
 
@@ -534,6 +529,7 @@ class MyScriber(rumps.App):
             self._waveform_window = None
         self._waveform_image_view = None
         self._waveform_blur_view = None
+        self._waveform_mask_layer = None
         log.info("Waveform overlay hidden")
 
     def _set_waveform_processing(self):
@@ -552,36 +548,40 @@ class MyScriber(rumps.App):
                 return
 
             PW, PH = self.PROC_W, self.PROC_H
-            PAD_X, PAD_Y = 12, 8
-            WIN_W = PW + PAD_X * 2
-            WIN_H = PH + PAD_Y * 2
 
-            # Resize window to smaller processing size
+            # Resize window to processing size
             screen = NSScreen.mainScreen()
             if screen:
                 sf = screen.visibleFrame()
-                new_x = sf.origin.x + (sf.size.width - WIN_W) / 2.0
+                new_x = sf.origin.x + (sf.size.width - PW) / 2.0
                 new_y = sf.origin.y + 30
                 self._waveform_window.setFrame_display_(
-                    NSMakeRect(new_x, new_y, WIN_W, WIN_H), True
+                    NSMakeRect(new_x, new_y, PW, PH), True
                 )
 
-            # Resize all layers in the glass stack
+            # Resize all layers
             content = self._waveform_window.contentView()
             if content:
-                content.setFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+                content.setFrame_(NSMakeRect(0, 0, PW, PH))
                 for sub in content.subviews():
-                    sub.setFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
-                    for innersub in sub.subviews():
-                        if innersub is not self._waveform_image_view:
-                            innersub.setFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+                    sub.setFrame_(NSMakeRect(0, 0, PW, PH))
 
-            # Replace image view content with first processing frame
+            # Update mask for proc dot shapes
+            import Quartz as _Q
+            if self._waveform_blur_view and self._proc_masks and self._proc_masks[0]:
+                mask_layer = _Q.CALayer.layer()
+                mask_layer.setFrame_(_Q.CGRectMake(0, 0, PW, PH))
+                mask_layer.setContents_(self._proc_masks[0].CGImageForProposedRect_context_hints_(None, None, None))
+                self._waveform_blur_view.layer().setMask_(mask_layer)
+                self._waveform_mask_layer = mask_layer
+
+            # Replace edge image with first processing frame
             iv = self._waveform_image_view
             if iv:
-                iv.setFrame_(NSMakeRect(PAD_X, PAD_Y, PW, PH))
+                iv.setFrame_(NSMakeRect(0, 0, PW, PH))
                 self._proc_frame_idx = 0
-                iv.setImage_(self._proc_frames[0])
+                if self._proc_edges and self._proc_edges[0]:
+                    iv.setImage_(self._proc_edges[0])
 
             # Start animation timer: cycle frames at ~10fps
             if self._waveform_timer:
@@ -597,18 +597,31 @@ class MyScriber(rumps.App):
             log.warning(f"Could not set waveform processing: {e}")
 
     def procAnimTick_(self, timer):
-        """NSTimer callback: advance processing animation frame."""
+        """NSTimer callback: advance processing animation frame (mask + edge)."""
         try:
-            if self._waveform_image_view and self._proc_frames:
-                self._proc_frame_idx = (self._proc_frame_idx + 1) % len(self._proc_frames)
-                self._waveform_image_view.setImage_(self._proc_frames[self._proc_frame_idx])
+            n = len(self._proc_edges) if self._proc_edges else 0
+            if not n:
+                return
+            self._proc_frame_idx = (self._proc_frame_idx + 1) % n
+            idx = self._proc_frame_idx
+
+            # Update edge highlights
+            if self._waveform_image_view and idx < len(self._proc_edges):
+                self._waveform_image_view.setImage_(self._proc_edges[idx])
+
+            # Update blur mask
+            if (self._waveform_blur_view and self._waveform_mask_layer
+                    and idx < len(self._proc_masks) and self._proc_masks[idx]):
+                self._waveform_mask_layer.setContents_(
+                    self._proc_masks[idx].CGImageForProposedRect_context_hints_(None, None, None)
+                )
         except Exception:
             pass
 
     def _update_waveform(self, rms):
-        """Thread-safe update of waveform overlay image based on volume level.
-        Throttled to ~8 fps to avoid flooding the main thread with callAfter."""
-        if not self._waveform_image_view or not self._wave_images:
+        """Thread-safe update of waveform overlay (mask + edge) based on volume.
+        Throttled to ~16 fps to avoid flooding the main thread with callAfter."""
+        if not self._waveform_image_view:
             return
         now = time.time()
         if now - self._last_waveform_update < 0.0625:  # max 16 updates/sec
@@ -621,11 +634,21 @@ class MyScriber(rumps.App):
                 level = max(1, min(int((db + 54) / 8), 5))
             else:
                 level = 0
-            img = self._wave_images[level] if level < len(self._wave_images) else None
-            if img:
-                AppHelper.callAfter(
-                    lambda i=img: self._waveform_image_view.setImage_(i) if self._waveform_image_view else None
-                )
+            if level == self._last_vol_level:
+                return
+            self._last_vol_level = level
+
+            edge = self._wave_edges[level] if level < len(self._wave_edges) else None
+            mask = self._wave_masks[level] if level < len(self._wave_masks) else None
+
+            def _swap():
+                if self._waveform_image_view and edge:
+                    self._waveform_image_view.setImage_(edge)
+                if self._waveform_mask_layer and mask:
+                    self._waveform_mask_layer.setContents_(
+                        mask.CGImageForProposedRect_context_hints_(None, None, None)
+                    )
+            AppHelper.callAfter(_swap)
         except Exception:
             pass
 
