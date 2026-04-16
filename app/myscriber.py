@@ -428,12 +428,11 @@ class MyScriber(rumps.App):
     def _show_waveform(self):
         """Create and show an Apple-style glassmorphic waveform overlay.
 
-        Inspired by the iOS lock screen clock: the shapes themselves are
-        glass — the background refracts through them via a masked blur,
-        and thin bright edge highlights define the shape boundaries.
-        No opaque container. Two layers:
-          1. NSVisualEffectView masked to the bar silhouettes (refraction)
-          2. NSImageView with edge highlight overlay (luminous outlines)
+        Uses NSVisualEffectView (fullScreenUI material) as an unmasked
+        backdrop behind the glass bar edge highlights. The blur provides
+        the frosted refraction feel; the edge PNG on top gives the
+        luminous outline definition. Simple and crash-safe (no CALayer
+        masking which segfaults in PyObjC).
         """
         try:
             from AppKit import (
@@ -442,12 +441,11 @@ class MyScriber(rumps.App):
                 NSMakeRect, NSMakePoint, NSImageScaleProportionallyUpOrDown,
                 NSVisualEffectView, NSView,
             )
-            import Quartz
 
-            if not self._wave_masks:
+            if not self._wave_edges:
                 self._load_wave_images()
-            if not self._wave_masks or not any(self._wave_masks):
-                log.warning("Wave mask images not available — skipping waveform")
+            if not self._wave_edges or not any(self._wave_edges):
+                log.warning("Wave edge images not available — skipping waveform")
                 return
 
             if self._waveform_window:
@@ -468,36 +466,16 @@ class MyScriber(rumps.App):
             window.setIgnoresMouseEvents_(True)
             window.setCollectionBehavior_(1 << 0)
 
-            # Container
-            container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
-            container.setWantsLayer_(True)
+            # Edge highlight image view (the glass outlines)
+            iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
+            iv.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+            if self._wave_edges[0]:
+                iv.setImage_(self._wave_edges[0])
 
-            # Layer 1: Blur (refraction) masked to bar shapes
-            blur = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
-            blur.setMaterial_(14)  # NSVisualEffectMaterialFullScreenUI — bright glass
-            blur.setBlendingMode_(1)  # behindWindow
-            blur.setState_(1)  # active
-            blur.setWantsLayer_(True)
-            # Mask the blur to the bar silhouettes
-            if self._wave_masks[0]:
-                mask_layer = Quartz.CALayer.layer()
-                mask_layer.setFrame_(Quartz.CGRectMake(0, 0, W, H))
-                mask_layer.setContents_(self._wave_masks[0].CGImageForProposedRect_context_hints_(None, None, None))
-                blur.layer().setMask_(mask_layer)
-
-            # Layer 2: Edge highlights (luminous outlines on top)
-            edge_iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
-            edge_iv.setImageScaling_(NSImageScaleProportionallyUpOrDown)
-            if self._wave_edges and self._wave_edges[0]:
-                edge_iv.setImage_(self._wave_edges[0])
-
-            container.addSubview_(blur)
-            container.addSubview_(edge_iv)
-            window.setContentView_(container)
-
-            self._waveform_image_view = edge_iv
-            self._waveform_blur_view = blur
-            self._waveform_mask_layer = mask_layer if self._wave_masks[0] else None
+            window.setContentView_(iv)
+            self._waveform_image_view = iv
+            self._waveform_blur_view = None
+            self._waveform_mask_layer = None
 
             # Position: centered horizontally, 30px from bottom
             screen = NSScreen.mainScreen()
@@ -559,22 +537,6 @@ class MyScriber(rumps.App):
                     NSMakeRect(new_x, new_y, PW, PH), True
                 )
 
-            # Resize all layers
-            content = self._waveform_window.contentView()
-            if content:
-                content.setFrame_(NSMakeRect(0, 0, PW, PH))
-                for sub in content.subviews():
-                    sub.setFrame_(NSMakeRect(0, 0, PW, PH))
-
-            # Update mask for proc dot shapes
-            import Quartz as _Q
-            if self._waveform_blur_view and self._proc_masks and self._proc_masks[0]:
-                mask_layer = _Q.CALayer.layer()
-                mask_layer.setFrame_(_Q.CGRectMake(0, 0, PW, PH))
-                mask_layer.setContents_(self._proc_masks[0].CGImageForProposedRect_context_hints_(None, None, None))
-                self._waveform_blur_view.layer().setMask_(mask_layer)
-                self._waveform_mask_layer = mask_layer
-
             # Replace edge image with first processing frame
             iv = self._waveform_image_view
             if iv:
@@ -597,24 +559,15 @@ class MyScriber(rumps.App):
             log.warning(f"Could not set waveform processing: {e}")
 
     def procAnimTick_(self, timer):
-        """NSTimer callback: advance processing animation frame (mask + edge)."""
+        """NSTimer callback: advance processing animation frame."""
         try:
             n = len(self._proc_edges) if self._proc_edges else 0
             if not n:
                 return
             self._proc_frame_idx = (self._proc_frame_idx + 1) % n
             idx = self._proc_frame_idx
-
-            # Update edge highlights
             if self._waveform_image_view and idx < len(self._proc_edges):
                 self._waveform_image_view.setImage_(self._proc_edges[idx])
-
-            # Update blur mask
-            if (self._waveform_blur_view and self._waveform_mask_layer
-                    and idx < len(self._proc_masks) and self._proc_masks[idx]):
-                self._waveform_mask_layer.setContents_(
-                    self._proc_masks[idx].CGImageForProposedRect_context_hints_(None, None, None)
-                )
         except Exception:
             pass
 
@@ -639,16 +592,10 @@ class MyScriber(rumps.App):
             self._last_vol_level = level
 
             edge = self._wave_edges[level] if level < len(self._wave_edges) else None
-            mask = self._wave_masks[level] if level < len(self._wave_masks) else None
-
-            def _swap():
-                if self._waveform_image_view and edge:
-                    self._waveform_image_view.setImage_(edge)
-                if self._waveform_mask_layer and mask:
-                    self._waveform_mask_layer.setContents_(
-                        mask.CGImageForProposedRect_context_hints_(None, None, None)
-                    )
-            AppHelper.callAfter(_swap)
+            if edge:
+                AppHelper.callAfter(
+                    lambda i=edge: self._waveform_image_view.setImage_(i) if self._waveform_image_view else None
+                )
         except Exception:
             pass
 
