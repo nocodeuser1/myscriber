@@ -29,10 +29,13 @@ echo "✓ Updated myscriber.py"
 
 # ── Generate and install app icons ──────────────────────────────────────
 cp "$SCRIPT_DIR/app/make_icons.py" "$INSTALL_DIR/app/make_icons.py" 2>/dev/null
+cp "$SCRIPT_DIR/app/make_wave_icons.py" "$INSTALL_DIR/app/make_wave_icons.py" 2>/dev/null
 
 # Always regenerate icons to ensure they're up to date
 echo "Generating app icons..."
 "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/app/make_icons.py" 2>/dev/null && echo "✓ Icon PNGs generated" || true
+echo "Generating waveform icons..."
+"$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/app/make_wave_icons.py" 2>/dev/null && echo "✓ Waveform PNGs generated" || true
 
 # Also copy pre-generated assets from repo
 if [ -d "$SCRIPT_DIR/assets" ]; then

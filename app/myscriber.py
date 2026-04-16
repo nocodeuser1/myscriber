@@ -226,6 +226,7 @@ class MyScriber(rumps.App):
         self._volume_icons  = []  # NSImages for volume levels (blue mic)
         self._waveform_window = None
         self._waveform_image_view = None
+        self._waveform_blur_view = None
         self._waveform_timer = None
         self._hotkey_health_timer = None
         self._last_transcribed_text = ""  # for notification click → overlay
@@ -490,6 +491,7 @@ class MyScriber(rumps.App):
                 pass
             self._waveform_window = None
         self._waveform_image_view = None
+        self._waveform_blur_view = None
         log.info("Waveform overlay hidden")
 
     def _set_waveform_processing(self):
@@ -507,20 +509,29 @@ class MyScriber(rumps.App):
                 log.warning("No processing frames loaded")
                 return
 
-            # Resize window to smaller processing size (40x18 pt)
+            PW, PH = self.PROC_W, self.PROC_H
+            PAD_X, PAD_Y = 12, 8
+            WIN_W = PW + PAD_X * 2
+            WIN_H = PH + PAD_Y * 2
+
+            # Resize window to smaller processing size
             screen = NSScreen.mainScreen()
             if screen:
                 sf = screen.visibleFrame()
-                new_x = sf.origin.x + (sf.size.width - 40) / 2.0
+                new_x = sf.origin.x + (sf.size.width - WIN_W) / 2.0
                 new_y = sf.origin.y + 30
                 self._waveform_window.setFrame_display_(
-                    NSMakeRect(new_x, new_y, 40, 18), True
+                    NSMakeRect(new_x, new_y, WIN_W, WIN_H), True
                 )
+
+            # Resize blur backdrop
+            if self._waveform_blur_view:
+                self._waveform_blur_view.setFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
 
             # Replace image view content with first processing frame
             iv = self._waveform_image_view
             if iv:
-                iv.setFrame_(NSMakeRect(0, 0, 40, 18))
+                iv.setFrame_(NSMakeRect(PAD_X, PAD_Y, PW, PH))
                 self._proc_frame_idx = 0
                 iv.setImage_(self._proc_frames[0])
 
