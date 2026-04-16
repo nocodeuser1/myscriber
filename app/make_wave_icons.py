@@ -21,7 +21,8 @@ from pathlib import Path
 ASSETS = Path(__file__).parent.parent / "assets"
 ASSETS.mkdir(exist_ok=True)
 
-IND_R, IND_G, IND_B = 90, 70, 215
+# Bright vivid indigo — saturated and luminous for any background
+IND_R, IND_G, IND_B = 125, 95, 255
 
 # ── Minimal PNG writer ─────────────────────────────────────────────────────
 
@@ -55,8 +56,8 @@ def clamp(v, lo=0.0, hi=1.0):
 # 11 bars with varying heights for waveform shape
 BAR_HEIGHTS = [0.30, 0.45, 0.55, 0.70, 0.85, 1.0, 0.85, 0.70, 0.55, 0.45, 0.30]
 NUM_BARS = len(BAR_HEIGHTS)
-BAR_W_FRAC = 0.045
-GAP_FRAC = 0.025
+BAR_W_FRAC = 0.058   # wider bars
+GAP_FRAC = 0.020     # tighter gaps
 TOTAL_W = NUM_BARS * BAR_W_FRAC + (NUM_BARS - 1) * GAP_FRAC
 START_X = (1.0 - TOTAL_W) / 2.0
 
@@ -145,8 +146,8 @@ def draw_wave_edge(w, h, fill_level):
     - Outer glow for visibility on any background
     """
     pixels = []
-    stroke_w = 3.0 / w   # extra bold edge stroke (~3 pixels)
-    glow_w = 7.0 / w     # wider outer glow radius
+    stroke_w = 3.5 / w   # extra bold edge stroke (~3.5 pixels)
+    glow_w = 8.0 / w     # wide outer glow radius
 
     for py in range(h):
         for px in range(w):
@@ -220,11 +221,11 @@ def draw_wave_edge(w, h, fill_level):
                 if best_in_fill_zone:
                     # Strong indigo fill inside bars — pops on any background
                     r, g, b = IND_R, IND_G, IND_B
-                    a = int(clamp(best_inside * 0.85) * 255)
+                    a = int(clamp(best_inside * 0.92) * 255)
                 else:
                     # Glass body: semi-transparent white
                     r, g, b = 255, 255, 255
-                    a = int(clamp(best_inside * 0.22) * 255)
+                    a = int(clamp(best_inside * 0.28) * 255)
 
             elif best_glow > 0.01:
                 # Outer glow: indigo-tinted when volume active, white otherwise

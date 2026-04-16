@@ -1322,14 +1322,21 @@ class MyScriber(rumps.App):
             return
         self.recording = False
         self._last_vol_level = -1
-        if self.stream:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception as e:
-                log.warning(f"Error stopping audio stream: {e}")
-            finally:
-                self.stream = None
+        self._last_wave_level = -1
+        # Grab reference and clear immediately so audio callback stops
+        stream_ref = self.stream
+        self.stream = None
+        # Stop stream in background thread — stream.stop() waits for the
+        # audio callback to finish, but the callback uses callAfter which
+        # needs the main thread. Stopping on main = deadlock.
+        if stream_ref:
+            def _close_stream():
+                try:
+                    stream_ref.stop()
+                    stream_ref.close()
+                except Exception as e:
+                    log.warning(f"Error stopping audio stream: {e}")
+            threading.Thread(target=_close_stream, daemon=True).start()
 
         log.info(f"Recording STOPPED, starting transcription (thread={threading.current_thread().name})")
 
