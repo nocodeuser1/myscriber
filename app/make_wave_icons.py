@@ -145,8 +145,8 @@ def draw_wave_edge(w, h, fill_level):
     - Outer glow for visibility on any background
     """
     pixels = []
-    stroke_w = 2.2 / w   # bold edge stroke (~2.2 pixels)
-    glow_w = 4.5 / w     # outer glow radius
+    stroke_w = 3.0 / w   # extra bold edge stroke (~3 pixels)
+    glow_w = 7.0 / w     # wider outer glow radius
 
     for py in range(h):
         for px in range(w):
@@ -171,7 +171,7 @@ def draw_wave_edge(w, h, fill_level):
 
                 # Outer glow (soft falloff outside the bar)
                 if d > 0:
-                    glow_alpha = clamp(1.0 - d / glow_w) * 0.35
+                    glow_alpha = clamp(1.0 - d / glow_w) * 0.5
                 else:
                     glow_alpha = 0.0
 
@@ -205,8 +205,8 @@ def draw_wave_edge(w, h, fill_level):
                 brightness = clamp(brightness, 0.45, 1.0)
 
                 if best_in_fill_zone:
-                    # Edge in fill zone: bright indigo-white mix
-                    mix = 0.4  # 40% indigo tint
+                    # Edge in fill zone: vivid indigo edge
+                    mix = 0.65  # 65% indigo tint for punchy color
                     r = int((IND_R * mix + 255 * (1 - mix)) * brightness)
                     g = int((IND_G * mix + 255 * (1 - mix)) * brightness)
                     b = int((IND_B * mix + 255 * (1 - mix)) * brightness)
@@ -218,18 +218,22 @@ def draw_wave_edge(w, h, fill_level):
 
             elif best_inside > 0.01:
                 if best_in_fill_zone:
-                    # Visible indigo fill inside bars
+                    # Strong indigo fill inside bars — pops on any background
                     r, g, b = IND_R, IND_G, IND_B
-                    a = int(clamp(best_inside * 0.55) * 255)
+                    a = int(clamp(best_inside * 0.85) * 255)
                 else:
                     # Glass body: semi-transparent white
                     r, g, b = 255, 255, 255
-                    a = int(clamp(best_inside * 0.18) * 255)
+                    a = int(clamp(best_inside * 0.22) * 255)
 
             elif best_glow > 0.01:
-                # Outer glow: soft white halo
-                r, g, b = 220, 220, 235
-                a = int(clamp(best_glow) * 255)
+                # Outer glow: indigo-tinted when volume active, white otherwise
+                if best_in_fill_zone:
+                    r, g, b = IND_R, IND_G, IND_B
+                    a = int(clamp(best_glow * 0.7) * 255)
+                else:
+                    r, g, b = 220, 220, 240
+                    a = int(clamp(best_glow) * 255)
 
             pixels.append((r, g, b, a))
     return pixels
