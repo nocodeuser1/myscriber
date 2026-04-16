@@ -1384,10 +1384,12 @@ class MyScriber(rumps.App):
     # ── Smart paste / overlay ────────────────────────────────────────────────
 
     def _deliver_text(self, text):
-        """Paste text directly if focused element is editable, else copy to
-        clipboard and show a notification.  Clicking the notification opens
-        the overlay editor so the user can refine the text before copying.
-        If the overlay is already open, new text is appended there instead."""
+        """Always copy text to clipboard and attempt a Cmd+V paste. If the
+        accessibility API can't confirm the focused element is editable
+        (common in Electron apps like Claude desktop and browsers), still
+        attempt the paste but also show a notification as a safety net so
+        the user can open the editor if the paste didn't land.
+        If the overlay is already open, append new text there instead."""
         try:
             # If overlay is already open, always append there
             if self._overlay_panel and self._overlay_panel.isVisible():
@@ -1399,18 +1401,19 @@ class MyScriber(rumps.App):
             try:
                 editable = self._focused_element_is_editable()
             except Exception as e:
-                log.warning(f"Editable check failed: {e} — will copy to clipboard")
+                log.warning(f"Editable check failed: {e}")
+
+            # Always attempt the paste — AppleScript Cmd+V is harmless if
+            # nothing is focused, and works reliably in Electron/browsers
+            # where the AX API can't report editability.
+            self._last_transcribed_text = text
+            self._paste_to_cursor(text)
 
             if editable:
-                log.info("Editable field focused — pasting directly")
-                self._paste_to_cursor(text)
+                log.info("Editable field confirmed — pasted directly, no notification")
             else:
-                # No editable field: copy to clipboard and notify
-                log.info("No editable field — copying to clipboard + notification")
-                self._last_transcribed_text = text
-                proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
-                proc.communicate(text.encode("utf-8"))
-                # Notification with userInfo so clicking it opens the overlay
+                # Detection uncertain — also show notification as safety net
+                log.info("Editable field not confirmed — pasted + showing notification")
                 preview = text[:80] + ("…" if len(text) > 80 else "")
                 self._notify(
                     "myScriber",
@@ -1646,6 +1649,8 @@ class MyScriber(rumps.App):
                         return True
 
                 # ── Check 7: Electron/browser app heuristic ──
+                # Electron apps and browsers often don't expose editable AX
+                # attributes. Assume text fields exist and let Cmd+V paste try.
                 # bundle_id already read at top of function
                 electron_ids = {
                     "com.anthropic.claude",
@@ -1658,6 +1663,15 @@ class MyScriber(rumps.App):
                     "com.figma.Desktop",
                     "com.notion.id",
                     "com.linear",
+                    # Browsers — fields on webpages often fail AX queries
+                    "com.apple.Safari",
+                    "com.google.Chrome",
+                    "com.microsoft.edgemac",
+                    "company.thebrowser.Browser",  # Arc
+                    "com.brave.Browser",
+                    "org.mozilla.firefox",
+                    "com.operasoftware.Opera",
+                    "com.vivaldi.Vivaldi",
                 }
                 log.info(f"Editable check 7: bundle_id={bundle_id}")
                 for eid in electron_ids:
