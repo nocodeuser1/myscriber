@@ -399,14 +399,20 @@ class MyScriber(rumps.App):
             log.warning(f"Could not load wave images: {e}")
 
     def _show_waveform(self):
-        """Create and show a glassmorphic waveform overlay at bottom center."""
+        """Create and show a glassmorphic waveform overlay at bottom center.
+
+        Uses Apple-style glassmorphism: semi-transparent tinted background
+        with system vibrancy, visible border, and drop shadow. Looks great
+        on both light and dark backgrounds.
+        """
         try:
             from AppKit import (
                 NSWindow, NSWindowStyleMaskBorderless, NSBackingStoreBuffered,
                 NSFloatingWindowLevel, NSColor, NSScreen, NSImageView,
-                NSMakeRect, NSMakePoint, NSImageScaleProportionallyUpOrDown,
-                NSVisualEffectView, NSView, NSBezierPath,
+                NSMakeRect, NSMakePoint, NSMakeSize, NSImageScaleProportionallyUpOrDown,
+                NSVisualEffectView, NSView, NSShadow,
             )
+            import Quartz
 
             if not self._wave_images or not any(self._wave_images):
                 self._load_wave_images()
@@ -419,10 +425,10 @@ class MyScriber(rumps.App):
                 self._hide_waveform()
 
             W, H = self.WAVE_W, self.WAVE_H
-            # Add padding around the wave image for the glass backdrop
             PAD_X, PAD_Y = 16, 10
             WIN_W = W + PAD_X * 2
             WIN_H = H + PAD_Y * 2
+            CORNER_R = 14.0
 
             window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(0, 0, WIN_W, WIN_H),
@@ -435,32 +441,68 @@ class MyScriber(rumps.App):
             window.setLevel_(NSFloatingWindowLevel)
             window.setHidesOnDeactivate_(False)
             window.setIgnoresMouseEvents_(True)
-            window.setCollectionBehavior_(1 << 0)  # NSWindowCollectionBehaviorCanJoinAllSpaces
+            window.setCollectionBehavior_(1 << 0)  # canJoinAllSpaces
+            window.setHasShadow_(True)
 
-            # Glassmorphic backdrop: frosted blur + rounded corners + subtle border
+            # Container view with layer for shadow + clipping
+            container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+            container.setWantsLayer_(True)
+            container.layer().setCornerRadius_(CORNER_R)
+            container.layer().setMasksToBounds_(False)
+            # Drop shadow — ensures visibility on light backgrounds
+            container.layer().setShadowOpacity_(0.25)
+            container.layer().setShadowRadius_(12.0)
+            container.layer().setShadowOffset_(Quartz.CGSizeMake(0, -2))
+            container.layer().setShadowColor_(
+                NSColor.blackColor().CGColor()
+            )
+
+            # Vibrancy layer: system blur that adapts to light/dark mode
             blur = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
-            blur.setMaterial_(13)  # NSVisualEffectMaterialHUDWindow — glass-like
+            blur.setMaterial_(13)  # HUDWindow — dark translucent glass
             blur.setBlendingMode_(1)  # behindWindow
             blur.setState_(1)  # active
             blur.setWantsLayer_(True)
-            blur.layer().setCornerRadius_(14.0)
+            blur.layer().setCornerRadius_(CORNER_R)
             blur.layer().setMasksToBounds_(True)
-            # Subtle light border for glass edge
-            blur.layer().setBorderWidth_(0.5)
-            blur.layer().setBorderColor_(
-                NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.2).CGColor()
+
+            # Tinted overlay — semi-transparent dark layer ensures the glass
+            # is always visible even on pure white backgrounds (Apple style)
+            tint = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+            tint.setWantsLayer_(True)
+            tint.layer().setBackgroundColor_(
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                    0.08, 0.06, 0.14, 0.55  # dark indigo-tinted, 55% opacity
+                ).CGColor()
+            )
+            tint.layer().setCornerRadius_(CORNER_R)
+            tint.layer().setMasksToBounds_(True)
+
+            # Visible border — thin bright line for glass edge definition
+            tint.layer().setBorderWidth_(0.75)
+            tint.layer().setBorderColor_(
+                NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.18).CGColor()
             )
 
-            # Image view centered on top of blur
+            # Inner glow: second border layer for depth
+            blur.layer().setBorderWidth_(0.5)
+            blur.layer().setBorderColor_(
+                NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.08).CGColor()
+            )
+
+            # Image view on top
             iv = NSImageView.alloc().initWithFrame_(NSMakeRect(PAD_X, PAD_Y, W, H))
             iv.setImageScaling_(NSImageScaleProportionallyUpOrDown)
             if self._wave_images[0]:
                 iv.setImage_(self._wave_images[0])
 
+            # Layer stack: container > blur > tint > image
+            blur.addSubview_(tint)
             blur.addSubview_(iv)
-            window.setContentView_(blur)
+            container.addSubview_(blur)
+            window.setContentView_(container)
             self._waveform_image_view = iv
-            self._waveform_blur_view = blur  # keep reference
+            self._waveform_blur_view = blur
 
             # Position: centered horizontally, 30px from bottom
             screen = NSScreen.mainScreen()
@@ -524,9 +566,15 @@ class MyScriber(rumps.App):
                     NSMakeRect(new_x, new_y, WIN_W, WIN_H), True
                 )
 
-            # Resize blur backdrop
-            if self._waveform_blur_view:
-                self._waveform_blur_view.setFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+            # Resize all layers in the glass stack
+            content = self._waveform_window.contentView()
+            if content:
+                content.setFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+                for sub in content.subviews():
+                    sub.setFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+                    for innersub in sub.subviews():
+                        if innersub is not self._waveform_image_view:
+                            innersub.setFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
 
             # Replace image view content with first processing frame
             iv = self._waveform_image_view
