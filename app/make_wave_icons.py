@@ -21,8 +21,8 @@ from pathlib import Path
 ASSETS = Path(__file__).parent.parent / "assets"
 ASSETS.mkdir(exist_ok=True)
 
-# Bright vivid indigo — saturated and luminous for any background
-IND_R, IND_G, IND_B = 125, 95, 255
+# Electric indigo — vivid, saturated, luminous on any background
+IND_R, IND_G, IND_B = 140, 100, 255
 
 # ── Minimal PNG writer ─────────────────────────────────────────────────────
 
@@ -56,8 +56,8 @@ def clamp(v, lo=0.0, hi=1.0):
 # 11 bars with varying heights for waveform shape
 BAR_HEIGHTS = [0.30, 0.45, 0.55, 0.70, 0.85, 1.0, 0.85, 0.70, 0.55, 0.45, 0.30]
 NUM_BARS = len(BAR_HEIGHTS)
-BAR_W_FRAC = 0.058   # wider bars
-GAP_FRAC = 0.020     # tighter gaps
+BAR_W_FRAC = 0.065   # thick glass bars
+GAP_FRAC = 0.018     # tight gaps
 TOTAL_W = NUM_BARS * BAR_W_FRAC + (NUM_BARS - 1) * GAP_FRAC
 START_X = (1.0 - TOTAL_W) / 2.0
 
@@ -137,17 +137,23 @@ def draw_wave_mask(w, h, fill_level):
 # ── Wave edge highlights ──────────────────────────────────────────────────
 
 def draw_wave_edge(w, h, fill_level):
-    """Glass bar rendering with bright edges and visible interior.
+    """iOS clock-digit glass style: the color IS the glass.
 
-    Each bar has:
-    - Bold bright edge stroke (top-lit, brighter on top half)
-    - Semi-transparent white interior fill (glass body, ~20%)
-    - Indigo fill rising from bottom when volume > 0
-    - Outer glow for visibility on any background
+    The indigo glow consumes the entire bar body — not just edges.
+    Like the iOS lock screen digits, the glass refracts and glows
+    with luminous color throughout, with brighter luminous edges
+    and a soft outer halo.
+
+    Layers (composited):
+    1. Outer glow halo — soft indigo bloom around each bar
+    2. Glass body fill — indigo-tinted semi-transparent fill
+    3. Inner glow — brighter indigo core radiating from center
+    4. Luminous edge stroke — bright hot edge defining the shape
     """
     pixels = []
-    stroke_w = 3.5 / w   # extra bold edge stroke (~3.5 pixels)
-    glow_w = 8.0 / w     # wide outer glow radius
+    stroke_w = 3.0 / w     # crisp luminous edge
+    glow_w = 10.0 / w      # wide outer halo
+    inner_glow_w = 6.0 / w # inner glow falloff from edge
 
     for py in range(h):
         for px in range(w):
@@ -157,6 +163,7 @@ def draw_wave_edge(w, h, fill_level):
             best_edge = 0.0
             best_glow = 0.0
             best_inside = 0.0
+            best_inner_glow = 0.0
             best_is_top = False
             best_ny_ratio = 0.5
             best_in_fill_zone = False
@@ -167,17 +174,22 @@ def draw_wave_edge(w, h, fill_level):
                 bar_top = 0.5 - bh * 0.45
                 bar_bot = 0.5 + bh * 0.45
 
-                # Bold edge stroke
+                # Luminous edge stroke
                 edge_alpha = clamp(1.0 - abs(d) / stroke_w)
 
-                # Outer glow (soft falloff outside the bar)
+                # Outer glow halo (soft bloom outside the bar)
+                glow_alpha = 0.0
                 if d > 0:
-                    glow_alpha = clamp(1.0 - d / glow_w) * 0.5
-                else:
-                    glow_alpha = 0.0
+                    glow_alpha = clamp(1.0 - d / glow_w) ** 1.5 * 0.6
 
                 # Inside fill
                 inside_alpha = clamp(0.5 - d * w)
+
+                # Inner glow: brightest near edge, fading toward center
+                inner_glow = 0.0
+                if d < 0:
+                    edge_dist = -d  # distance from edge inward
+                    inner_glow = clamp(1.0 - edge_dist / inner_glow_w)
 
                 if edge_alpha > best_edge:
                     best_edge = edge_alpha
@@ -190,51 +202,74 @@ def draw_wave_edge(w, h, fill_level):
 
                 if inside_alpha > best_inside:
                     best_inside = inside_alpha
-                    # Check if in volume fill zone
                     fill_threshold_y = bar_bot - (bar_bot - bar_top) * fill_level
                     best_in_fill_zone = (ny >= fill_threshold_y and fill_level > 0)
+
+                if inner_glow > best_inner_glow:
+                    best_inner_glow = inner_glow
 
             r, g, b, a = 0, 0, 0, 0
 
             if best_edge > 0.01:
-                # Top-lit directional lighting
+                # Hot luminous edge — always indigo-white, brighter on top
                 if best_is_top:
-                    brightness = 1.0 - best_ny_ratio * 0.25
+                    brightness = 1.0 - best_ny_ratio * 0.15
                 else:
-                    brightness = 0.75 - (best_ny_ratio - 0.5) * 0.25
+                    brightness = 0.85 - (best_ny_ratio - 0.5) * 0.15
 
-                brightness = clamp(brightness, 0.45, 1.0)
+                brightness = clamp(brightness, 0.6, 1.0)
 
                 if best_in_fill_zone:
-                    # Edge in fill zone: vivid indigo edge
-                    mix = 0.65  # 65% indigo tint for punchy color
+                    # Fill zone: hot white-indigo edge (like glowing neon)
+                    hot = 0.7  # white-hot center
+                    r = int(clamp(IND_R / 255 * (1 - hot) + hot) * brightness * 255)
+                    g = int(clamp(IND_G / 255 * (1 - hot) + hot) * brightness * 255)
+                    b = int(clamp(IND_B / 255 * (1 - hot) + hot) * brightness * 255)
+                else:
+                    # Unfilled: indigo-tinted glass edge (not plain white)
+                    mix = 0.4  # 40% indigo tint on glass edge
                     r = int((IND_R * mix + 255 * (1 - mix)) * brightness)
                     g = int((IND_G * mix + 255 * (1 - mix)) * brightness)
                     b = int((IND_B * mix + 255 * (1 - mix)) * brightness)
-                else:
-                    r = int(255 * brightness)
-                    g = int(255 * brightness)
-                    b = int(255 * brightness)
                 a = int(clamp(best_edge * brightness) * 255)
 
             elif best_inside > 0.01:
+                # Glass body: indigo-tinted throughout (color IS the glass)
                 if best_in_fill_zone:
-                    # Strong indigo fill inside bars — pops on any background
-                    r, g, b = IND_R, IND_G, IND_B
-                    a = int(clamp(best_inside * 0.92) * 255)
+                    # Active fill: vivid saturated indigo glass
+                    # Inner glow makes it brighter near edges
+                    glow_boost = 0.3 * best_inner_glow
+                    body_r = clamp(IND_R / 255 + glow_boost)
+                    body_g = clamp(IND_G / 255 + glow_boost)
+                    body_b = clamp(IND_B / 255 + glow_boost)
+                    r = int(body_r * 255)
+                    g = int(body_g * 255)
+                    b = int(body_b * 255)
+                    # Strong opacity — the indigo glows through
+                    base_opacity = 0.88
+                    edge_boost = 0.12 * best_inner_glow
+                    a = int(clamp(best_inside * (base_opacity + edge_boost)) * 255)
                 else:
-                    # Glass body: semi-transparent white
-                    r, g, b = 255, 255, 255
-                    a = int(clamp(best_inside * 0.28) * 255)
+                    # Unfilled glass: subtle indigo-tinted (not plain white)
+                    # The glass itself has indigo color, just dimmer
+                    tint = 0.35  # 35% indigo, 65% white
+                    r = int(IND_R * tint + 255 * (1 - tint))
+                    g = int(IND_G * tint + 255 * (1 - tint))
+                    b = int(IND_B * tint + 255 * (1 - tint))
+                    # Moderate opacity — visible glass body
+                    base_opacity = 0.32
+                    edge_boost = 0.15 * best_inner_glow
+                    a = int(clamp(best_inside * (base_opacity + edge_boost)) * 255)
 
             elif best_glow > 0.01:
-                # Outer glow: indigo-tinted when volume active, white otherwise
+                # Outer halo: indigo bloom around every bar
                 if best_in_fill_zone:
                     r, g, b = IND_R, IND_G, IND_B
-                    a = int(clamp(best_glow * 0.7) * 255)
+                    a = int(clamp(best_glow * 0.8) * 255)
                 else:
-                    r, g, b = 220, 220, 240
-                    a = int(clamp(best_glow) * 255)
+                    # Subtle indigo halo even for unfilled bars
+                    r, g, b = int(IND_R * 0.6 + 255 * 0.4), int(IND_G * 0.6 + 255 * 0.4), int(IND_B * 0.6 + 255 * 0.4)
+                    a = int(clamp(best_glow * 0.45) * 255)
 
             pixels.append((r, g, b, a))
     return pixels
