@@ -747,9 +747,11 @@ class MyScriber(rumps.App):
         self._last_waveform_update = now
         try:
             from PyObjCTools import AppHelper
-            if rms > 0.002:
+            if rms > 0.001:
                 db = 20.0 * math.log10(rms)
-                level = max(1, min(int((db + 54) / 8), 5))
+                # More sensitive mapping: -50dB→1, -42dB→2, -34dB→3, -26dB→4, -18dB→5
+                # Normal speech is around -30 to -15 dB, so levels 3-5 fire easily
+                level = max(1, min(int((db + 50) / 8), 5))
             else:
                 level = 0
             if level == self._last_wave_level:

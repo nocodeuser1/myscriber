@@ -53,19 +53,35 @@ def clamp(v, lo=0.0, hi=1.0):
 
 # ── Bar geometry (shared by mask and edge) ─────────────────────────────────
 
-# 11 bars with varying heights for waveform shape
-BAR_HEIGHTS = [0.30, 0.45, 0.55, 0.70, 0.85, 1.0, 0.85, 0.70, 0.55, 0.45, 0.30]
-NUM_BARS = len(BAR_HEIGHTS)
+# 11 bars with varying max heights for waveform shape
+BAR_HEIGHTS_MAX = [0.30, 0.45, 0.55, 0.70, 0.85, 1.0, 0.85, 0.70, 0.55, 0.45, 0.30]
+NUM_BARS = len(BAR_HEIGHTS_MAX)
 BAR_W_FRAC = 0.065   # thick glass bars
 GAP_FRAC = 0.018     # tight gaps
 TOTAL_W = NUM_BARS * BAR_W_FRAC + (NUM_BARS - 1) * GAP_FRAC
 START_X = (1.0 - TOTAL_W) / 2.0
 
+# Per-level height scales — bars GROW with volume for obvious visual feedback
+# Level 0 = silent (tiny stubs), Level 5 = loud (full dramatic waveform)
+LEVEL_SCALES = [0.18, 0.35, 0.55, 0.72, 0.88, 1.0]
+
+# Module-level state for current bar heights (set before each render pass)
+_active_bar_heights = list(BAR_HEIGHTS_MAX)
+
+
+def set_level_scale(level):
+    """Set bar heights for a given volume level (0-5)."""
+    global _active_bar_heights
+    scale = LEVEL_SCALES[min(level, len(LEVEL_SCALES) - 1)]
+    # Minimum bar height so they're always visible as stubs
+    min_h = 0.12
+    _active_bar_heights = [max(min_h, h * scale) for h in BAR_HEIGHTS_MAX]
+
 
 def bar_sdf(nx, ny, bar_idx):
     """Returns signed distance to a bar in normalized coords.
     Negative = inside, positive = outside."""
-    bh = BAR_HEIGHTS[bar_idx]
+    bh = _active_bar_heights[bar_idx]
     bx = START_X + bar_idx * (BAR_W_FRAC + GAP_FRAC)
     bw = BAR_W_FRAC
 
@@ -102,7 +118,7 @@ def closest_bar_info(nx, ny, w):
         if d < best_d:
             best_d = d
             best_i = i
-            bh = BAR_HEIGHTS[i]
+            bh = _active_bar_heights[i]
             best_top = 0.5 - bh * 0.45
             best_bot = 0.5 + bh * 0.45
     return best_d, best_i, best_top, best_bot
@@ -110,8 +126,9 @@ def closest_bar_info(nx, ny, w):
 
 # ── Wave mask (solid white silhouette for blur masking) ────────────────────
 
-def draw_wave_mask(w, h, fill_level):
+def draw_wave_mask(w, h, fill_level, level=0):
     """White filled bars on transparent background. Used as mask for blur layer."""
+    set_level_scale(level)
     pixels = []
     for py in range(h):
         for px in range(w):
@@ -121,8 +138,7 @@ def draw_wave_mask(w, h, fill_level):
             best_alpha = 0.0
             for i in range(NUM_BARS):
                 d = bar_sdf(nx, ny, i)
-                # Anti-aliased fill
-                aa = clamp(0.5 - d * w)  # scale to pixels for AA
+                aa = clamp(0.5 - d * w)
                 if aa > best_alpha:
                     best_alpha = aa
 
@@ -136,15 +152,23 @@ def draw_wave_mask(w, h, fill_level):
 
 # ── Wave edge highlights ──────────────────────────────────────────────────
 
-def _render_wave_edge(w, h, fill_level, mode="dark"):
+def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
     """Render glass wave bars optimized for a specific background.
 
     mode="dark"  → bars sit on dark backgrounds (bright edges, vivid glow)
     mode="light" → bars sit on light backgrounds (darker outlines, visible body)
 
-    iOS clock-digit glass style: the color IS the glass. Indigo glow consumes
-    the entire bar body with luminous edges and a soft outer halo.
+    Bar heights now SCALE with volume level — the shape itself is the
+    volume indicator. fill_level controls the indigo fill intensity:
+    level 0 = subtle glass stubs, level 5 = tall vivid glowing bars.
     """
+    set_level_scale(level)
+
+    # At higher levels, bars are always filled with indigo (height = volume)
+    # At level 0, bars are unfilled glass stubs
+    if level >= 1:
+        fill_level = 1.0  # full indigo fill — the height IS the feedback
+
     pixels = []
 
     if mode == "dark":
@@ -199,7 +223,7 @@ def _render_wave_edge(w, h, fill_level, mode="dark"):
 
             for i in range(NUM_BARS):
                 d = bar_sdf(nx, ny, i)
-                bh = BAR_HEIGHTS[i]
+                bh = _active_bar_heights[i]
                 bar_top = 0.5 - bh * 0.45
                 bar_bot = 0.5 + bh * 0.45
 
@@ -281,14 +305,14 @@ def _render_wave_edge(w, h, fill_level, mode="dark"):
     return pixels
 
 
-def draw_wave_edge(w, h, fill_level):
+def draw_wave_edge(w, h, fill_level, level=0):
     """Light-background variant (default / backward compat)."""
-    return _render_wave_edge(w, h, fill_level, mode="light")
+    return _render_wave_edge(w, h, fill_level, mode="light", level=level)
 
 
-def draw_wave_edge_dark(w, h, fill_level):
+def draw_wave_edge_dark(w, h, fill_level, level=0):
     """Dark-background variant — bright glowing indigo glass."""
-    return _render_wave_edge(w, h, fill_level, mode="dark")
+    return _render_wave_edge(w, h, fill_level, mode="dark", level=level)
 
 
 # ── Processing dots ────────────────────────────────────────────────────────
@@ -386,14 +410,14 @@ for lvl in range(6):
     fill = lvl / 5.0
     for scale, suffix in [(1, ""), (2, "@2x")]:
         sw, sh = WAVE_W * scale, WAVE_H * scale
-        # Mask (shared by both modes)
-        px = draw_wave_mask(sw, sh, fill)
+        # Mask (bar shapes scale with level)
+        px = draw_wave_mask(sw, sh, fill, level=lvl)
         write_png(ASSETS / f"wave_mask_{lvl}{suffix}.png", px, sw, sh)
-        # Light-bg edge highlights (default)
-        px = draw_wave_edge(sw, sh, fill)
+        # Light-bg edge highlights
+        px = draw_wave_edge(sw, sh, fill, level=lvl)
         write_png(ASSETS / f"wave_edge_{lvl}{suffix}.png", px, sw, sh)
         # Dark-bg edge highlights
-        px = draw_wave_edge_dark(sw, sh, fill)
+        px = draw_wave_edge_dark(sw, sh, fill, level=lvl)
         write_png(ASSETS / f"wave_edge_dark_{lvl}{suffix}.png", px, sw, sh)
 
 PROC_W, PROC_H = 32, 14
