@@ -1333,6 +1333,7 @@ class MyScriber(rumps.App):
 
         if self.config["mode"] == "toggle":
             def on_activate():
+                log.info(f"pynput toggle hotkey fired (recording={self.recording})")
                 if self.recording:
                     self._stop_and_transcribe()
                 else:
@@ -1358,9 +1359,10 @@ class MyScriber(rumps.App):
                 try:
                     if self._trigger_matches(key, trigger_key) and modifier_keys.issubset(held):
                         pressed["down"] = True
+                        log.info("pynput push-to-talk: key DOWN — start recording")
                         self._start_recording()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.error(f"pynput on_press error: {e}", exc_info=True)
 
             def on_release(key):
                 try:
@@ -1373,9 +1375,10 @@ class MyScriber(rumps.App):
                 try:
                     if self._trigger_matches(key, trigger_key) or self._canonical_key(key) in modifier_keys:
                         pressed["down"] = False
+                        log.info("pynput push-to-talk: key UP — stop recording")
                         self._stop_and_transcribe()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.error(f"pynput on_release error: {e}", exc_info=True)
 
             self._hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
 
