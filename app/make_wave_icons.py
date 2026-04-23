@@ -136,24 +136,53 @@ def draw_wave_mask(w, h, fill_level):
 
 # ── Wave edge highlights ──────────────────────────────────────────────────
 
-def draw_wave_edge(w, h, fill_level):
-    """iOS clock-digit glass style: the color IS the glass.
+def _render_wave_edge(w, h, fill_level, mode="dark"):
+    """Render glass wave bars optimized for a specific background.
 
-    The indigo glow consumes the entire bar body — not just edges.
-    Like the iOS lock screen digits, the glass refracts and glows
-    with luminous color throughout, with brighter luminous edges
-    and a soft outer halo.
+    mode="dark"  → bars sit on dark backgrounds (bright edges, vivid glow)
+    mode="light" → bars sit on light backgrounds (darker outlines, visible body)
 
-    Layers (composited):
-    1. Outer glow halo — soft indigo bloom around each bar
-    2. Glass body fill — indigo-tinted semi-transparent fill
-    3. Inner glow — brighter indigo core radiating from center
-    4. Luminous edge stroke — bright hot edge defining the shape
+    iOS clock-digit glass style: the color IS the glass. Indigo glow consumes
+    the entire bar body with luminous edges and a soft outer halo.
     """
     pixels = []
-    stroke_w = 3.0 / w     # crisp luminous edge
-    glow_w = 10.0 / w      # wide outer halo
-    inner_glow_w = 6.0 / w # inner glow falloff from edge
+
+    if mode == "dark":
+        # Dark bg: bright luminous everything, high opacity, vivid indigo
+        stroke_w = 3.5 / w
+        glow_w = 12.0 / w
+        inner_glow_w = 7.0 / w
+        # Edges: white-hot indigo
+        edge_fill_hot = 0.55        # less white, more indigo in fill zone edges
+        edge_glass_indigo = 0.5     # indigo tint on unfilled edges
+        edge_brightness_min = 0.7
+        # Body
+        fill_body_opacity = 0.92
+        fill_edge_boost = 0.12
+        glass_body_tint = 0.5       # 50% indigo tint on unfilled glass
+        glass_body_opacity = 0.38
+        glass_edge_boost = 0.18
+        # Outer glow
+        fill_glow_opacity = 0.85
+        glass_glow_opacity = 0.5
+    else:
+        # Light bg: darker outlines, visible body against white
+        stroke_w = 3.5 / w
+        glow_w = 10.0 / w
+        inner_glow_w = 6.0 / w
+        # Edges: darker indigo (not white — white on white is invisible)
+        edge_fill_hot = 0.2         # mostly indigo, little white
+        edge_glass_indigo = 0.7     # strong indigo on unfilled edges
+        edge_brightness_min = 0.55
+        # Body
+        fill_body_opacity = 0.9
+        fill_edge_boost = 0.1
+        glass_body_tint = 0.55      # 55% indigo on unfilled glass
+        glass_body_opacity = 0.35
+        glass_edge_boost = 0.15
+        # Outer glow
+        fill_glow_opacity = 0.75
+        glass_glow_opacity = 0.4
 
     for py in range(h):
         for px in range(w):
@@ -174,22 +203,17 @@ def draw_wave_edge(w, h, fill_level):
                 bar_top = 0.5 - bh * 0.45
                 bar_bot = 0.5 + bh * 0.45
 
-                # Luminous edge stroke
                 edge_alpha = clamp(1.0 - abs(d) / stroke_w)
 
-                # Outer glow halo (soft bloom outside the bar)
                 glow_alpha = 0.0
                 if d > 0:
                     glow_alpha = clamp(1.0 - d / glow_w) ** 1.5 * 0.6
 
-                # Inside fill
                 inside_alpha = clamp(0.5 - d * w)
 
-                # Inner glow: brightest near edge, fading toward center
                 inner_glow = 0.0
                 if d < 0:
-                    edge_dist = -d  # distance from edge inward
-                    inner_glow = clamp(1.0 - edge_dist / inner_glow_w)
+                    inner_glow = clamp(1.0 - (-d) / inner_glow_w)
 
                 if edge_alpha > best_edge:
                     best_edge = edge_alpha
@@ -211,68 +235,60 @@ def draw_wave_edge(w, h, fill_level):
             r, g, b, a = 0, 0, 0, 0
 
             if best_edge > 0.01:
-                # Hot luminous edge — always indigo-white, brighter on top
                 if best_is_top:
                     brightness = 1.0 - best_ny_ratio * 0.15
                 else:
                     brightness = 0.85 - (best_ny_ratio - 0.5) * 0.15
-
-                brightness = clamp(brightness, 0.6, 1.0)
+                brightness = clamp(brightness, edge_brightness_min, 1.0)
 
                 if best_in_fill_zone:
-                    # Fill zone: hot white-indigo edge (like glowing neon)
-                    hot = 0.7  # white-hot center
+                    hot = edge_fill_hot
                     r = int(clamp(IND_R / 255 * (1 - hot) + hot) * brightness * 255)
                     g = int(clamp(IND_G / 255 * (1 - hot) + hot) * brightness * 255)
                     b = int(clamp(IND_B / 255 * (1 - hot) + hot) * brightness * 255)
                 else:
-                    # Unfilled: indigo-tinted glass edge (not plain white)
-                    mix = 0.4  # 40% indigo tint on glass edge
+                    mix = edge_glass_indigo
                     r = int((IND_R * mix + 255 * (1 - mix)) * brightness)
                     g = int((IND_G * mix + 255 * (1 - mix)) * brightness)
                     b = int((IND_B * mix + 255 * (1 - mix)) * brightness)
                 a = int(clamp(best_edge * brightness) * 255)
 
             elif best_inside > 0.01:
-                # Glass body: indigo-tinted throughout (color IS the glass)
                 if best_in_fill_zone:
-                    # Active fill: vivid saturated indigo glass
-                    # Inner glow makes it brighter near edges
                     glow_boost = 0.3 * best_inner_glow
-                    body_r = clamp(IND_R / 255 + glow_boost)
-                    body_g = clamp(IND_G / 255 + glow_boost)
-                    body_b = clamp(IND_B / 255 + glow_boost)
-                    r = int(body_r * 255)
-                    g = int(body_g * 255)
-                    b = int(body_b * 255)
-                    # Strong opacity — the indigo glows through
-                    base_opacity = 0.88
-                    edge_boost = 0.12 * best_inner_glow
-                    a = int(clamp(best_inside * (base_opacity + edge_boost)) * 255)
+                    r = int(clamp(IND_R / 255 + glow_boost) * 255)
+                    g = int(clamp(IND_G / 255 + glow_boost) * 255)
+                    b = int(clamp(IND_B / 255 + glow_boost) * 255)
+                    a = int(clamp(best_inside * (fill_body_opacity + fill_edge_boost * best_inner_glow)) * 255)
                 else:
-                    # Unfilled glass: subtle indigo-tinted (not plain white)
-                    # The glass itself has indigo color, just dimmer
-                    tint = 0.35  # 35% indigo, 65% white
+                    tint = glass_body_tint
                     r = int(IND_R * tint + 255 * (1 - tint))
                     g = int(IND_G * tint + 255 * (1 - tint))
                     b = int(IND_B * tint + 255 * (1 - tint))
-                    # Moderate opacity — visible glass body
-                    base_opacity = 0.32
-                    edge_boost = 0.15 * best_inner_glow
-                    a = int(clamp(best_inside * (base_opacity + edge_boost)) * 255)
+                    a = int(clamp(best_inside * (glass_body_opacity + glass_edge_boost * best_inner_glow)) * 255)
 
             elif best_glow > 0.01:
-                # Outer halo: indigo bloom around every bar
                 if best_in_fill_zone:
                     r, g, b = IND_R, IND_G, IND_B
-                    a = int(clamp(best_glow * 0.8) * 255)
+                    a = int(clamp(best_glow * fill_glow_opacity) * 255)
                 else:
-                    # Subtle indigo halo even for unfilled bars
-                    r, g, b = int(IND_R * 0.6 + 255 * 0.4), int(IND_G * 0.6 + 255 * 0.4), int(IND_B * 0.6 + 255 * 0.4)
-                    a = int(clamp(best_glow * 0.45) * 255)
+                    r = int(IND_R * 0.6 + 255 * 0.4)
+                    g = int(IND_G * 0.6 + 255 * 0.4)
+                    b = int(IND_B * 0.6 + 255 * 0.4)
+                    a = int(clamp(best_glow * glass_glow_opacity) * 255)
 
             pixels.append((r, g, b, a))
     return pixels
+
+
+def draw_wave_edge(w, h, fill_level):
+    """Light-background variant (default / backward compat)."""
+    return _render_wave_edge(w, h, fill_level, mode="light")
+
+
+def draw_wave_edge_dark(w, h, fill_level):
+    """Dark-background variant — bright glowing indigo glass."""
+    return _render_wave_edge(w, h, fill_level, mode="dark")
 
 
 # ── Processing dots ────────────────────────────────────────────────────────
@@ -363,19 +379,22 @@ def draw_proc_edge(w, h, frame, total_frames=12):
 
 # ── Generate ───────────────────────────────────────────────────────────────
 
-print("Generating glassmorphic waveform assets...")
+print("Generating glassmorphic waveform assets (light + dark variants)...")
 
 WAVE_W, WAVE_H = 96, 32
 for lvl in range(6):
     fill = lvl / 5.0
     for scale, suffix in [(1, ""), (2, "@2x")]:
         sw, sh = WAVE_W * scale, WAVE_H * scale
-        # Mask
+        # Mask (shared by both modes)
         px = draw_wave_mask(sw, sh, fill)
         write_png(ASSETS / f"wave_mask_{lvl}{suffix}.png", px, sw, sh)
-        # Edge highlights
+        # Light-bg edge highlights (default)
         px = draw_wave_edge(sw, sh, fill)
         write_png(ASSETS / f"wave_edge_{lvl}{suffix}.png", px, sw, sh)
+        # Dark-bg edge highlights
+        px = draw_wave_edge_dark(sw, sh, fill)
+        write_png(ASSETS / f"wave_edge_dark_{lvl}{suffix}.png", px, sw, sh)
 
 PROC_W, PROC_H = 32, 14
 PROC_FRAMES = 12

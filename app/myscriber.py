@@ -90,7 +90,7 @@ MLX_MODEL_MAP = {
     "large-v3": "mlx-community/whisper-large-v3-mlx",
 }
 
-APP_VERSION  = "1.0.26"
+APP_VERSION  = "1.0.27"
 GITHUB_REPO  = "nocodeuser1/myscriber"  # GitHub repo (private)
 UPDATE_URL   = "https://gist.githubusercontent.com/nocodeuser1/19ae5cbd0057f2f7a3b04ac2f667118f/raw/version.json"
 
@@ -223,14 +223,18 @@ class MyScriber(rumps.App):
         self._hotkey_listener = None
         self._event_tap = None
         self._last_vol_level = -1
-        self._volume_icons  = []  # NSImages for volume levels (blue mic)
+        self._volume_icons  = []  # NSImages for active volume level set
+        self._volume_icons_light = []
+        self._volume_icons_dark = []
         self._waveform_window = None
         self._waveform_image_view = None
         self._waveform_blur_view = None
         self._waveform_mask_layer = None
         self._waveform_timer = None
         self._wave_masks = []
-        self._wave_edges = []
+        self._wave_edges = []        # active edge set (light or dark)
+        self._wave_edges_light = []
+        self._wave_edges_dark = []
         self._proc_masks = []
         self._proc_edges = []
         self._hotkey_health_timer = None
@@ -253,6 +257,9 @@ class MyScriber(rumps.App):
             AppHelper.callAfter(self._restore_template_icon)
         except Exception:
             pass
+
+        # Start main thread watchdog — detects freezes and logs diagnostics
+        self._start_watchdog()
 
     # ── Application icon (shown on all dialogs) ────────────────────────────
 
@@ -322,25 +329,157 @@ class MyScriber(rumps.App):
         except Exception as e:
             log.warning(f"Could not set notification delegate: {e}")
 
+    # ── Main thread watchdog ────────────────────────────────────────────────
+
+    _watchdog_heartbeat = 0.0  # timestamp of last main-thread heartbeat
+
+    def _start_watchdog(self):
+        """Start a background thread that monitors main thread responsiveness.
+        If the main thread stops responding for >20 seconds while recording,
+        log diagnostics and attempt recovery."""
+        import time as _time
+
+        def _heartbeat_tick():
+            """Called on main thread via callAfter — proves run loop is alive."""
+            self._watchdog_heartbeat = _time.time()
+
+        def _watchdog_loop():
+            while True:
+                _time.sleep(5)
+                try:
+                    # Ask the main thread to update the heartbeat
+                    from PyObjCTools import AppHelper
+                    AppHelper.callAfter(_heartbeat_tick)
+                    _time.sleep(2)  # give main thread 2s to respond
+
+                    age = _time.time() - self._watchdog_heartbeat
+                    if age > 20 and self.recording:
+                        log.error(f"WATCHDOG: Main thread unresponsive for {age:.0f}s "
+                                  f"during recording! Attempting recovery...")
+                        log.error(f"  recording={self.recording}, "
+                                  f"stream={self.stream is not None}, "
+                                  f"transcribing={getattr(self, '_transcribing', False)}")
+                        # Force-stop recording to unblock
+                        self.recording = False
+                        self._last_vol_level = -1
+                        self._last_wave_level = -1
+                        stream_ref = self.stream
+                        self.stream = None
+                        if stream_ref:
+                            def _emergency_close():
+                                try:
+                                    stream_ref.stop()
+                                    stream_ref.close()
+                                except Exception:
+                                    pass
+                            threading.Thread(target=_emergency_close, daemon=True).start()
+                        log.error("WATCHDOG: Emergency recording stop completed")
+                    elif age > 30 and not self.recording:
+                        log.warning(f"WATCHDOG: Main thread slow ({age:.0f}s since heartbeat) "
+                                    f"but not recording — may be a background stall")
+                except Exception as e:
+                    log.warning(f"Watchdog error: {e}")
+
+        self._watchdog_heartbeat = _time.time()
+        t = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
+        t.start()
+        log.info("Main thread watchdog started")
+
+    # ── Dark/Light mode detection ───────────────────────────────────────────
+
+    _is_dark_mode = False  # cached appearance state
+
+    def _detect_dark_mode(self):
+        """Detect if macOS is in dark mode. Returns True if dark."""
+        try:
+            from AppKit import NSApplication
+            app = NSApplication.sharedApplication()
+            appearance = app.effectiveAppearance()
+            name = appearance.bestMatchFromAppearancesWithNames_(
+                ["NSAppearanceNameAqua", "NSAppearanceNameDarkAqua"]
+            )
+            return name == "NSAppearanceNameDarkAqua"
+        except Exception:
+            # Fallback: check user defaults
+            try:
+                from Foundation import NSUserDefaults
+                style = NSUserDefaults.standardUserDefaults().stringForKey_("AppleInterfaceStyle")
+                return style and style.lower() == "dark"
+            except Exception:
+                return False
+
+    def _check_appearance_change(self):
+        """Check if dark/light mode changed and swap assets if needed."""
+        is_dark = self._detect_dark_mode()
+        if is_dark != self._is_dark_mode:
+            self._is_dark_mode = is_dark
+            log.info(f"Appearance changed: {'dark' if is_dark else 'light'} mode")
+            self._swap_active_assets()
+
+    def _swap_active_assets(self):
+        """Swap the active wave edges and volume icons for current appearance."""
+        is_dark = self._is_dark_mode
+        # Swap wave edges
+        if is_dark and self._wave_edges_dark:
+            self._wave_edges = self._wave_edges_dark
+            self._wave_images = list(self._wave_edges_dark)
+        elif not is_dark and self._wave_edges_light:
+            self._wave_edges = self._wave_edges_light
+            self._wave_images = list(self._wave_edges_light)
+
+        # Swap volume icons
+        if is_dark and self._volume_icons_dark:
+            self._volume_icons = self._volume_icons_dark
+        elif not is_dark and self._volume_icons_light:
+            self._volume_icons = self._volume_icons_light
+
+        # Force refresh of current waveform if visible
+        if self._waveform_image_view and self._wave_edges:
+            level = max(0, self._last_wave_level)
+            if level < len(self._wave_edges) and self._wave_edges[level]:
+                try:
+                    self._waveform_image_view.setImage_(self._wave_edges[level])
+                except Exception:
+                    pass
+
+        log.info(f"Swapped to {'dark' if is_dark else 'light'} assets")
+
     def _load_volume_icons(self):
-        """Pre-load blue volume-level icons for recording feedback."""
+        """Pre-load volume-level icons for both light and dark menubars."""
         try:
             from AppKit import NSImage, NSSize
+
+            self._volume_icons_light = []
+            self._volume_icons_dark = []
+
             for i in range(6):
-                retina = ASSETS_DIR / f"mic_vol_{i}@2x.png"
-                normal = ASSETS_DIR / f"mic_vol_{i}.png"
-                img = None
-                if retina.exists():
-                    img = NSImage.alloc().initWithContentsOfFile_(str(retina))
-                    if img:
-                        img.setSize_(NSSize(18, 18))  # retina: 36px at 18pt
-                        img.setTemplate_(False)  # show actual blue color
-                elif normal.exists():
-                    img = NSImage.alloc().initWithContentsOfFile_(str(normal))
-                    if img:
-                        img.setTemplate_(False)
-                self._volume_icons.append(img)
-            log.info(f"Loaded {len([i for i in self._volume_icons if i])} volume icons")
+                # Light menubar (black outline)
+                for prefix, lst in [("mic_vol_", self._volume_icons_light),
+                                    ("mic_vol_dark_", self._volume_icons_dark)]:
+                    retina = ASSETS_DIR / f"{prefix}{i}@2x.png"
+                    normal = ASSETS_DIR / f"{prefix}{i}.png"
+                    img = None
+                    if retina.exists():
+                        img = NSImage.alloc().initWithContentsOfFile_(str(retina))
+                        if img:
+                            img.setSize_(NSSize(18, 18))
+                            img.setTemplate_(False)
+                    elif normal.exists():
+                        img = NSImage.alloc().initWithContentsOfFile_(str(normal))
+                        if img:
+                            img.setTemplate_(False)
+                    lst.append(img)
+
+            # Set active set based on current appearance
+            self._is_dark_mode = self._detect_dark_mode()
+            if self._is_dark_mode and any(self._volume_icons_dark):
+                self._volume_icons = self._volume_icons_dark
+            else:
+                self._volume_icons = self._volume_icons_light
+
+            log.info(f"Loaded {len([i for i in self._volume_icons_light if i])} light + "
+                     f"{len([i for i in self._volume_icons_dark if i])} dark volume icons "
+                     f"(active: {'dark' if self._is_dark_mode else 'light'})")
         except Exception as e:
             log.warning(f"Could not load volume icons: {e}")
 
@@ -370,17 +509,32 @@ class MyScriber(rumps.App):
     PROC_W, PROC_H = 32, 14
 
     def _load_wave_images(self):
-        """Pre-load glassmorphic wave assets: mask images (for blur masking)
-        and edge highlight images (bright outlines layered on top).
-        Also loads processing animation mask+edge pairs."""
+        """Pre-load glassmorphic wave assets: mask images and edge highlights
+        for both light and dark backgrounds. Also loads processing animation."""
         try:
             from AppKit import NSImage, NSSize
 
-            # Wave: pairs of (mask, edge) per volume level
+            # Wave: masks (shared) + edges for light and dark backgrounds
             self._wave_masks = []
-            self._wave_edges = []
+            self._wave_edges_light = []
+            self._wave_edges_dark = []
+
             for i in range(6):
-                for lst, prefix in [(self._wave_masks, "wave_mask_"), (self._wave_edges, "wave_edge_")]:
+                # Mask (shared between modes)
+                retina = ASSETS_DIR / f"wave_mask_{i}@2x.png"
+                normal = ASSETS_DIR / f"wave_mask_{i}.png"
+                img = None
+                if retina.exists():
+                    img = NSImage.alloc().initWithContentsOfFile_(str(retina))
+                    if img:
+                        img.setSize_(NSSize(self.WAVE_W, self.WAVE_H))
+                elif normal.exists():
+                    img = NSImage.alloc().initWithContentsOfFile_(str(normal))
+                self._wave_masks.append(img)
+
+                # Light-bg edge
+                for prefix, lst in [("wave_edge_", self._wave_edges_light),
+                                    ("wave_edge_dark_", self._wave_edges_dark)]:
                     retina = ASSETS_DIR / f"{prefix}{i}@2x.png"
                     normal = ASSETS_DIR / f"{prefix}{i}.png"
                     img = None
@@ -392,8 +546,14 @@ class MyScriber(rumps.App):
                         img = NSImage.alloc().initWithContentsOfFile_(str(normal))
                     lst.append(img)
 
-                # Backward compat: _wave_images still used by _update_waveform
-                self._wave_images.append(self._wave_edges[i] if i < len(self._wave_edges) else None)
+            # Set active edge set based on current appearance
+            if self._is_dark_mode and any(self._wave_edges_dark):
+                self._wave_edges = self._wave_edges_dark
+            else:
+                self._wave_edges = self._wave_edges_light
+
+            # Backward compat: _wave_images mirrors active edges
+            self._wave_images = list(self._wave_edges)
 
             # Processing: pairs of (mask, edge) per frame
             self._proc_masks = []
@@ -441,6 +601,9 @@ class MyScriber(rumps.App):
                 NSMakeRect, NSMakePoint, NSImageScaleProportionallyUpOrDown,
                 NSVisualEffectView, NSView,
             )
+
+            # Re-check appearance and swap assets if needed
+            self._check_appearance_change()
 
             if not self._wave_edges:
                 self._load_wave_images()
@@ -1023,7 +1186,16 @@ class MyScriber(rumps.App):
                             pressed["down"] = True
                             _cancel_safety_timer()  # cancel any stale timer
                             log.info("Hotkey DOWN — start recording")
-                            app._start_recording()
+                            # CRITICAL: Dispatch via callAfter, NOT synchronously.
+                            # _start_recording opens a Core Audio stream which
+                            # may need the main run loop. If we call it inline
+                            # from the CGEventTap callback, the run loop is
+                            # blocked → Core Audio deadlocks → app freezes.
+                            try:
+                                from PyObjCTools import AppHelper
+                                AppHelper.callAfter(app._start_recording)
+                            except Exception:
+                                app._start_recording()
                             def _safety_timeout():
                                 if pressed["down"] and app.recording:
                                     try:
@@ -1248,6 +1420,9 @@ class MyScriber(rumps.App):
     _transcribing = False  # guard against overlapping transcriptions
 
     def _start_recording(self):
+        if self.recording:
+            log.info("Recording rejected: already recording")
+            return
         if not self.model_loaded:
             log.info("Recording rejected: model not loaded")
             self._notify("myScriber", "Model still loading — please wait.")
@@ -1260,6 +1435,12 @@ class MyScriber(rumps.App):
         self.audio_frames = []
         self._last_vol_level = -1
 
+        # Check appearance before showing waveform (picks right asset set)
+        try:
+            self._check_appearance_change()
+        except Exception as e:
+            log.warning(f"Appearance check failed (non-fatal): {e}")
+
         log.info(f"Recording STARTED (thread={threading.current_thread().name})")
 
         # Show blue mic at level 0 (outline only = "listening, no sound yet")
@@ -1267,12 +1448,15 @@ class MyScriber(rumps.App):
         try:
             from PyObjCTools import AppHelper
             def _start_ui():
-                self.title = ""
-                self._set_volume_icon(0)
-                self._show_waveform()
+                try:
+                    self.title = ""
+                    self._set_volume_icon(0)
+                    self._show_waveform()
+                except Exception as e:
+                    log.error(f"Error in _start_ui: {e}", exc_info=True)
             AppHelper.callAfter(_start_ui)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"Could not schedule UI start: {e}")
 
         # If overlay is open, update hint to show recording state (main thread)
         try:
@@ -1311,14 +1495,31 @@ class MyScriber(rumps.App):
                 except Exception:
                     pass
 
-        self.stream = sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=CHANNELS,
-            dtype="float32", callback=callback,
-        )
-        self.stream.start()
+        try:
+            log.info("Opening audio stream...")
+            self.stream = sd.InputStream(
+                samplerate=SAMPLE_RATE, channels=CHANNELS,
+                dtype="float32", callback=callback,
+            )
+            log.info("Starting audio stream...")
+            self.stream.start()
+            log.info("Audio stream started successfully")
+        except Exception as e:
+            log.error(f"Failed to open/start audio stream: {e}", exc_info=True)
+            self.recording = False
+            self.stream = None
+            try:
+                from PyObjCTools import AppHelper
+                AppHelper.callAfter(self._hide_waveform)
+                AppHelper.callAfter(self._restore_template_icon)
+            except Exception:
+                pass
+            self._notify("myScriber", f"Mic error: {e}")
+            return
 
     def _stop_and_transcribe(self):
         if not self.recording:
+            log.info("_stop_and_transcribe called but not recording — skipping")
             return
         self.recording = False
         self._last_vol_level = -1
@@ -1332,13 +1533,19 @@ class MyScriber(rumps.App):
         if stream_ref:
             def _close_stream():
                 try:
+                    log.info("Closing audio stream in background thread...")
                     stream_ref.stop()
                     stream_ref.close()
+                    log.info("Audio stream closed successfully")
                 except Exception as e:
                     log.warning(f"Error stopping audio stream: {e}")
             threading.Thread(target=_close_stream, daemon=True).start()
+        else:
+            log.warning("No audio stream to close — was it already stopped?")
 
-        log.info(f"Recording STOPPED, starting transcription (thread={threading.current_thread().name})")
+        log.info(f"Recording STOPPED, starting transcription "
+                 f"(thread={threading.current_thread().name}, "
+                 f"frames={len(self.audio_frames)})")
 
         # Restore normal template icon and show "transcribing" indicator
         # IMPORTANT: All AppKit/UI operations must happen on the main thread
@@ -1347,11 +1554,14 @@ class MyScriber(rumps.App):
         try:
             from PyObjCTools import AppHelper
             def _ui_cleanup():
-                self._restore_template_icon()
-                self.title = ""
-                self._set_waveform_processing()  # Switch to processing animation
-                if self._overlay_panel:
-                    self._overlay_set_recording(False)
+                try:
+                    self._restore_template_icon()
+                    self.title = ""
+                    self._set_waveform_processing()  # Switch to processing animation
+                    if self._overlay_panel:
+                        self._overlay_set_recording(False)
+                except Exception as e:
+                    log.error(f"Error in stop _ui_cleanup: {e}", exc_info=True)
             AppHelper.callAfter(_ui_cleanup)
         except Exception:
             pass

@@ -297,6 +297,91 @@ def draw_menubar_volume(size, fill_level):
     return pixels
 
 
+def draw_menubar_volume_dark(size, fill_level):
+    """Dark menubar variant: white outline + bright indigo fill.
+
+    Inverted from the light version — white structural lines so the mic
+    is visible against dark menu bars and wallpapers.
+    """
+    S = size
+    SS = 8
+    HR = S * SS
+
+    MW  = HR * 0.32
+    MH  = HR * 0.44
+    MX  = HR * 0.5 - MW / 2.0
+    MY  = HR * 0.04
+
+    ARC_CX = HR * 0.5
+    ARC_CY = MY + MH - HR * 0.02
+    ARC_R  = HR * 0.28
+    ARC_T  = max(3.0, HR * 0.11)
+
+    POLE_CX = HR * 0.5
+    POLE_Y1 = ARC_CY + ARC_R
+    POLE_Y2 = POLE_Y1 + HR * 0.13
+    POLE_T  = ARC_T
+
+    BASE_Y  = POLE_Y2
+    BASE_X1 = HR * 0.5 - HR * 0.20
+    BASE_X2 = HR * 0.5 + HR * 0.20
+    BASE_T  = ARC_T
+
+    STROKE_W = max(3.0, HR * 0.11)
+    fill_y_top = MY + MH * (1.0 - fill_level)
+
+    pixels_hr = []
+    for py_hr in range(HR):
+        for px_hr in range(HR):
+            px = px_hr + 0.5
+            py = py_hr + 0.5
+
+            d_capsule = sdf_capsule(px, py, MX, MY, MW, MH)
+            d_arc = sdf_circle_arc(px, py, ARC_CX, ARC_CY, ARC_R, ARC_T, 0, 180)
+            d_pole = sdf_rect(px, py, POLE_CX - POLE_T / 2, POLE_Y1, POLE_T, POLE_Y2 - POLE_Y1)
+            d_base = sdf_rect(px, py, BASE_X1, BASE_Y - BASE_T / 2, BASE_X2 - BASE_X1, BASE_T)
+
+            d_other = min(d_arc, d_pole, d_base)
+            alpha_other = clamp(0.5 - d_other)
+            alpha_ring = clamp(0.5 - (abs(d_capsule) - STROKE_W / 2.0))
+            alpha_outline = max(alpha_other, alpha_ring)
+
+            alpha_inside = clamp(0.5 - d_capsule)
+            alpha_below  = clamp(0.5 - (fill_y_top - py))
+            alpha_fill   = alpha_inside * alpha_below
+
+            pixels_hr.append((alpha_outline, alpha_fill))
+
+    # Bright indigo for dark backgrounds
+    IND_R, IND_G, IND_B = 140, 100, 255
+
+    pixels = []
+    for y in range(S):
+        for x in range(S):
+            outline_total = 0.0
+            fill_total = 0.0
+            for sy in range(SS):
+                for sx in range(SS):
+                    idx = (y * SS + sy) * HR + (x * SS + sx)
+                    outline_total += pixels_hr[idx][0]
+                    fill_total += pixels_hr[idx][1]
+            outline_avg = clamp(outline_total / (SS * SS))
+            fill_avg = clamp(fill_total / (SS * SS))
+
+            if fill_avg > 0.001:
+                # Bright indigo fill on white outline
+                r = int(IND_R * fill_avg + 255 * (1 - fill_avg))
+                g = int(IND_G * fill_avg + 255 * (1 - fill_avg))
+                b = int(IND_B * fill_avg + 255 * (1 - fill_avg))
+                a = int(max(outline_avg, fill_avg) * 255)
+            else:
+                r, g, b = 255, 255, 255  # white outline
+                a = int(outline_avg * 255)
+            pixels.append((r, g, b, a))
+
+    return pixels
+
+
 # ── Generate all assets ──────────────────────────────────────────────────────
 
 print("Generating myScriber icons...")
@@ -329,13 +414,17 @@ else:
     print("  (iconutil not available here — runs on Mac during install)")
 
 # Volume-level menubar icons (indigo fill-from-bottom inside black outline)
-print("Generating indigo volume icons...")
+print("Generating indigo volume icons (light + dark variants)...")
 
 # Level 0 = hollow outline (no fill). Levels 1-5 = indigo filling from bottom.
 for lvl in range(0, 6):
     fill = lvl / 5.0
     for sz, suffix in [(18, ""), (36, "@2x")]:
+        # Light menubar (black outline, indigo fill)
         px = draw_menubar_volume(sz, fill)
         write_png(ASSETS / f"mic_vol_{lvl}{suffix}.png", px, sz, sz)
+        # Dark menubar (white outline, bright indigo fill)
+        px = draw_menubar_volume_dark(sz, fill)
+        write_png(ASSETS / f"mic_vol_dark_{lvl}{suffix}.png", px, sz, sz)
 
 print("Icons done.")
