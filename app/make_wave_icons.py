@@ -2,15 +2,16 @@
 """
 Generates waveform overlay and processing animation PNGs.
 
-Apple-style glassmorphism: shapes are transparent with bright luminous
-edge highlights. The background refracts through the shapes (handled by
-NSVisualEffectView mask in the app). These PNGs provide:
-  1. An alpha mask image (white shapes on transparent) for the blur mask
-  2. An edge highlight overlay (bright strokes defining the glass edges)
+Apple-style glassmorphism: bars have a frosted-glass look with white
+surrounds (visible on dark backgrounds) and indigo fill that intensifies
+with volume. Level 0 = ghost glass bars (no indigo, just faint outlines).
+
+22 thin bars (double the previous 11) for a denser, sleeker waveform.
 
 Outputs (in assets/):
   wave_mask_0..5.png / @2x     — alpha mask for blur (shape silhouettes)
-  wave_edge_0..5.png / @2x     — bright edge highlights overlay
+  wave_edge_0..5.png / @2x     — edge highlights (light bg variant)
+  wave_edge_dark_0..5.png / @2x — edge highlights (dark bg variant)
   proc_mask_0..11.png / @2x    — processing dot masks
   proc_edge_0..11.png / @2x    — processing dot edge highlights
 """
@@ -21,7 +22,7 @@ from pathlib import Path
 ASSETS = Path(__file__).parent.parent / "assets"
 ASSETS.mkdir(exist_ok=True)
 
-# Blue-violet — punchy, saturated, luminous on any background
+# Blue-violet — punchy, saturated
 IND_R, IND_G, IND_B = 90, 40, 255
 
 # ── Minimal PNG writer ─────────────────────────────────────────────────────
@@ -51,21 +52,22 @@ def clamp(v, lo=0.0, hi=1.0):
     return max(lo, min(hi, v))
 
 
-# ── Bar geometry (shared by mask and edge) ─────────────────────────────────
+# ── Bar geometry ──────────────────────────────────────────────────────────
 
-# 11 bars with varying max heights for waveform shape
-BAR_HEIGHTS_MAX = [0.30, 0.45, 0.55, 0.70, 0.85, 1.0, 0.85, 0.70, 0.55, 0.45, 0.30]
-NUM_BARS = len(BAR_HEIGHTS_MAX)
-BAR_W_FRAC = 0.092   # chunky glass bars — unmissable on any background
-GAP_FRAC = 0.014     # tight gaps
+# 22 bars — smooth symmetric bell curve peaking at center
+BAR_HEIGHTS_MAX = [
+    0.22, 0.30, 0.38, 0.46, 0.54, 0.62, 0.70, 0.78, 0.86, 0.94, 1.0,
+    1.0, 0.94, 0.86, 0.78, 0.70, 0.62, 0.54, 0.46, 0.38, 0.30, 0.22,
+]
+NUM_BARS = len(BAR_HEIGHTS_MAX)  # 22
+BAR_W_FRAC = 0.035   # thin bars — half the width, double the count
+GAP_FRAC = 0.008     # tight gaps between bars
 TOTAL_W = NUM_BARS * BAR_W_FRAC + (NUM_BARS - 1) * GAP_FRAC
 START_X = (1.0 - TOTAL_W) / 2.0
 
-# Per-level height scales — bars GROW with volume for obvious visual feedback
-# Level 0 = silent (tiny stubs), Level 5 = loud (full dramatic waveform)
+# Per-level height scales — bars GROW with volume
 LEVEL_SCALES = [0.18, 0.35, 0.55, 0.72, 0.88, 1.0]
 
-# Module-level state for current bar heights (set before each render pass)
 _active_bar_heights = list(BAR_HEIGHTS_MAX)
 
 
@@ -73,14 +75,12 @@ def set_level_scale(level):
     """Set bar heights for a given volume level (0-5)."""
     global _active_bar_heights
     scale = LEVEL_SCALES[min(level, len(LEVEL_SCALES) - 1)]
-    # Minimum bar height so they're always visible as stubs
-    min_h = 0.12
+    min_h = 0.10  # minimum stub height
     _active_bar_heights = [max(min_h, h * scale) for h in BAR_HEIGHTS_MAX]
 
 
 def bar_sdf(nx, ny, bar_idx):
-    """Returns signed distance to a bar in normalized coords.
-    Negative = inside, positive = outside."""
+    """Signed distance to a bar in normalized coords. Negative = inside."""
     bh = _active_bar_heights[bar_idx]
     bx = START_X + bar_idx * (BAR_W_FRAC + GAP_FRAC)
     bw = BAR_W_FRAC
@@ -92,56 +92,35 @@ def bar_sdf(nx, ny, bar_idx):
     bar_hw = bw / 2.0
     bar_hh = (bar_bot - bar_top) / 2.0
 
-    # Rounded rect radius (normalized)
-    rx = bw * 0.42  # pill-shaped rounding
+    rx = bw * 0.45  # pill rounding
     ry = rx
 
     dx = abs(nx - bar_cx) - (bar_hw - rx)
     dy = abs(ny - bar_cy) - (bar_hh - ry)
 
     if dx <= 0 and dy <= 0:
-        return min(dx, dy)  # inside
+        return min(dx, dy)
     elif dx > 0 and dy > 0:
-        return math.sqrt(dx * dx + dy * dy)  # corner
+        return math.sqrt(dx * dx + dy * dy)
     else:
-        return max(dx, dy)  # edge
+        return max(dx, dy)
 
 
-def closest_bar_info(nx, ny, w):
-    """Returns (sdf_distance_normalized, bar_index, bar_top, bar_bot) for closest bar."""
-    best_d = 999.0
-    best_i = 0
-    best_top = 0.5
-    best_bot = 0.5
-    for i in range(NUM_BARS):
-        d = bar_sdf(nx, ny, i)
-        if d < best_d:
-            best_d = d
-            best_i = i
-            bh = _active_bar_heights[i]
-            best_top = 0.5 - bh * 0.45
-            best_bot = 0.5 + bh * 0.45
-    return best_d, best_i, best_top, best_bot
-
-
-# ── Wave mask (solid white silhouette for blur masking) ────────────────────
+# ── Wave mask (white silhouette for blur masking) ─────────────────────────
 
 def draw_wave_mask(w, h, fill_level, level=0):
-    """White filled bars on transparent background. Used as mask for blur layer."""
     set_level_scale(level)
     pixels = []
     for py in range(h):
         for px in range(w):
             nx = (px + 0.5) / w
             ny = (py + 0.5) / h
-
             best_alpha = 0.0
             for i in range(NUM_BARS):
                 d = bar_sdf(nx, ny, i)
                 aa = clamp(0.5 - d * w)
                 if aa > best_alpha:
                     best_alpha = aa
-
             if best_alpha > 0.001:
                 a = int(clamp(best_alpha) * 255)
                 pixels.append((255, 255, 255, a))
@@ -150,63 +129,71 @@ def draw_wave_mask(w, h, fill_level, level=0):
     return pixels
 
 
-# ── Wave edge highlights ──────────────────────────────────────────────────
+# ── Wave edge highlights ─────────────────────────────────────────────────
 
 def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
-    """Render glass wave bars optimized for a specific background.
+    """Render glass wave bars.
 
-    mode="dark"  → bars sit on dark backgrounds (bright edges, vivid glow)
-    mode="light" → bars sit on light backgrounds (darker outlines, visible body)
+    mode="dark"  → white surround + indigo fill (visible on dark wallpapers)
+    mode="light" → indigo outlines + indigo fill (visible on light bg)
 
-    Bar heights now SCALE with volume level — the shape itself is the
-    volume indicator. fill_level controls the indigo fill intensity:
-    level 0 = subtle glass stubs, level 5 = tall vivid glowing bars.
+    Level 0 = ghost glass bars (faint outline, no indigo fill — just shows
+    that the mic is listening). Level 1+ = indigo fills the bars.
     """
     set_level_scale(level)
 
-    # At higher levels, bars are always filled with indigo (height = volume)
-    # At level 0, bars are unfilled glass stubs
+    # Level 1+ always fully filled — height IS the feedback
     if level >= 1:
-        fill_level = 1.0  # full indigo fill — the height IS the feedback
+        fill_level = 1.0
+
+    is_ghost = (level == 0)
 
     pixels = []
 
     if mode == "dark":
-        # Dark bg: MAXIMUM luminosity — bars must glow against any dark wallpaper
-        stroke_w = 5.2 / w          # +30% thicker edges
-        glow_w = 21.0 / w           # +30% wider glow halo
-        inner_glow_w = 12.0 / w     # +30% inner glow
-        # Edges: blazing bright
-        edge_fill_hot = 0.45        # hotter white mix on filled edges
-        edge_glass_indigo = 0.2     # brighter (less tint = more white) unfilled edges
-        edge_brightness_min = 0.95  # almost full brightness floor
-        # Body
-        fill_body_opacity = 1.0     # fully opaque fill
-        fill_edge_boost = 0.20
-        glass_body_tint = 0.7       # 70% indigo tint on unfilled glass
-        glass_body_opacity = 0.72   # +30% glass body visibility
-        glass_edge_boost = 0.28
-        # Outer glow
-        fill_glow_opacity = 1.0     # max glow
-        glass_glow_opacity = 0.85
+        # ── Dark background parameters ──
+        stroke_w = 3.0 / w
+        white_glow_w = 14.0 / w      # white halo around bars
+        inner_glow_w = 6.0 / w
+
+        if is_ghost:
+            # Ghost: faint white outlines, no fill
+            edge_r, edge_g, edge_b = 255, 255, 255
+            edge_opacity = 0.45
+            body_opacity = 0.08       # barely-there glass body
+            body_r, body_g, body_b = 255, 255, 255
+            glow_opacity = 0.15
+            glow_r, glow_g, glow_b = 200, 200, 255  # hint of blue
+        else:
+            # Active: white surround + indigo fill
+            edge_r, edge_g, edge_b = 255, 255, 255
+            edge_opacity = 0.95
+            body_r, body_g, body_b = IND_R, IND_G, IND_B
+            body_opacity = 0.95
+            glow_r, glow_g, glow_b = 255, 255, 255
+            glow_opacity = 0.55
     else:
-        # Light bg: punchy indigo — unmissable against white/light
-        stroke_w = 5.2 / w          # +30% thicker edges
-        glow_w = 16.0 / w           # +30% glow spread
-        inner_glow_w = 9.0 / w      # +30% inner glow
-        # Edges: deep rich indigo
-        edge_fill_hot = 0.10        # almost pure indigo edges
-        edge_glass_indigo = 0.9     # very strong indigo on unfilled edges
-        edge_brightness_min = 0.7
-        # Body
-        fill_body_opacity = 1.0     # fully opaque
-        fill_edge_boost = 0.16
-        glass_body_tint = 0.8       # 80% indigo on unfilled glass
-        glass_body_opacity = 0.60   # +30% body visibility
-        glass_edge_boost = 0.24
-        # Outer glow
-        fill_glow_opacity = 1.0
-        glass_glow_opacity = 0.65
+        # ── Light background parameters ──
+        stroke_w = 3.0 / w
+        white_glow_w = 10.0 / w
+        inner_glow_w = 5.0 / w
+
+        if is_ghost:
+            # Ghost: faint indigo outlines
+            edge_r, edge_g, edge_b = IND_R, IND_G, IND_B
+            edge_opacity = 0.30
+            body_opacity = 0.06
+            body_r, body_g, body_b = IND_R, IND_G, IND_B
+            glow_opacity = 0.10
+            glow_r, glow_g, glow_b = IND_R, IND_G, IND_B
+        else:
+            # Active: deep indigo
+            edge_r, edge_g, edge_b = IND_R, IND_G, IND_B
+            edge_opacity = 0.95
+            body_r, body_g, body_b = IND_R, IND_G, IND_B
+            body_opacity = 0.90
+            glow_r, glow_g, glow_b = IND_R, IND_G, IND_B
+            glow_opacity = 0.45
 
     for py in range(h):
         for px in range(w):
@@ -214,118 +201,82 @@ def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
             ny = (py + 0.5) / h
 
             best_edge = 0.0
-            best_glow = 0.0
             best_inside = 0.0
+            best_glow = 0.0
             best_inner_glow = 0.0
-            best_is_top = False
-            best_ny_ratio = 0.5
-            best_in_fill_zone = False
 
             for i in range(NUM_BARS):
                 d = bar_sdf(nx, ny, i)
-                bh = _active_bar_heights[i]
-                bar_top = 0.5 - bh * 0.45
-                bar_bot = 0.5 + bh * 0.45
 
                 edge_alpha = clamp(1.0 - abs(d) / stroke_w)
-
+                inside_alpha = clamp(0.5 - d * w)
                 glow_alpha = 0.0
                 if d > 0:
-                    glow_alpha = clamp(1.0 - d / glow_w) ** 1.5 * 0.6
-
-                inside_alpha = clamp(0.5 - d * w)
-
+                    glow_alpha = clamp(1.0 - d / white_glow_w) ** 1.5 * 0.6
                 inner_glow = 0.0
                 if d < 0:
                     inner_glow = clamp(1.0 - (-d) / inner_glow_w)
 
                 if edge_alpha > best_edge:
                     best_edge = edge_alpha
-                    if bar_bot > bar_top:
-                        best_ny_ratio = clamp((ny - bar_top) / (bar_bot - bar_top))
-                    best_is_top = ny < (bar_top + bar_bot) / 2.0
-
-                if glow_alpha > best_glow:
-                    best_glow = glow_alpha
-
                 if inside_alpha > best_inside:
                     best_inside = inside_alpha
-                    fill_threshold_y = bar_bot - (bar_bot - bar_top) * fill_level
-                    best_in_fill_zone = (ny >= fill_threshold_y and fill_level > 0)
-
+                if glow_alpha > best_glow:
+                    best_glow = glow_alpha
                 if inner_glow > best_inner_glow:
                     best_inner_glow = inner_glow
 
             r, g, b, a = 0, 0, 0, 0
 
             if best_edge > 0.01:
-                if best_is_top:
-                    brightness = 1.0 - best_ny_ratio * 0.15
-                else:
-                    brightness = 0.85 - (best_ny_ratio - 0.5) * 0.15
-                brightness = clamp(brightness, edge_brightness_min, 1.0)
-
-                if best_in_fill_zone:
-                    hot = edge_fill_hot
-                    r = int(clamp(IND_R / 255 * (1 - hot) + hot) * brightness * 255)
-                    g = int(clamp(IND_G / 255 * (1 - hot) + hot) * brightness * 255)
-                    b = int(clamp(IND_B / 255 * (1 - hot) + hot) * brightness * 255)
-                else:
-                    mix = edge_glass_indigo
-                    r = int((IND_R * mix + 255 * (1 - mix)) * brightness)
-                    g = int((IND_G * mix + 255 * (1 - mix)) * brightness)
-                    b = int((IND_B * mix + 255 * (1 - mix)) * brightness)
-                a = int(clamp(best_edge * brightness) * 255)
+                # Edge stroke
+                brightness = 1.0
+                r, g, b = edge_r, edge_g, edge_b
+                # Inner glow brightens edge slightly
+                boost = 0.15 * best_inner_glow
+                r = min(255, int(r + boost * 255))
+                g = min(255, int(g + boost * 255))
+                b = min(255, int(b + boost * 255))
+                a = int(clamp(best_edge * edge_opacity) * 255)
 
             elif best_inside > 0.01:
-                if best_in_fill_zone:
-                    glow_boost = 0.3 * best_inner_glow
-                    r = int(clamp(IND_R / 255 + glow_boost) * 255)
-                    g = int(clamp(IND_G / 255 + glow_boost) * 255)
-                    b = int(clamp(IND_B / 255 + glow_boost) * 255)
-                    a = int(clamp(best_inside * (fill_body_opacity + fill_edge_boost * best_inner_glow)) * 255)
-                else:
-                    tint = glass_body_tint
-                    r = int(IND_R * tint + 255 * (1 - tint))
-                    g = int(IND_G * tint + 255 * (1 - tint))
-                    b = int(IND_B * tint + 255 * (1 - tint))
-                    a = int(clamp(best_inside * (glass_body_opacity + glass_edge_boost * best_inner_glow)) * 255)
+                # Body fill
+                glow_boost = 0.2 * best_inner_glow
+                r = min(255, int(body_r + glow_boost * 255))
+                g = min(255, int(body_g + glow_boost * 255))
+                b = min(255, int(body_b + glow_boost * 255))
+                a = int(clamp(best_inside * body_opacity) * 255)
 
             elif best_glow > 0.01:
-                if best_in_fill_zone:
-                    r, g, b = IND_R, IND_G, IND_B
-                    a = int(clamp(best_glow * fill_glow_opacity) * 255)
-                else:
-                    r = int(IND_R * 0.6 + 255 * 0.4)
-                    g = int(IND_G * 0.6 + 255 * 0.4)
-                    b = int(IND_B * 0.6 + 255 * 0.4)
-                    a = int(clamp(best_glow * glass_glow_opacity) * 255)
+                # Outer glow halo
+                r, g, b = glow_r, glow_g, glow_b
+                a = int(clamp(best_glow * glow_opacity) * 255)
 
             pixels.append((r, g, b, a))
     return pixels
 
 
 def draw_wave_edge(w, h, fill_level, level=0):
-    """Light-background variant (default / backward compat)."""
+    """Light-background variant."""
     return _render_wave_edge(w, h, fill_level, mode="light", level=level)
 
 
 def draw_wave_edge_dark(w, h, fill_level, level=0):
-    """Dark-background variant — bright glowing indigo glass."""
+    """Dark-background variant — white surround + indigo glass."""
     return _render_wave_edge(w, h, fill_level, mode="dark", level=level)
 
 
-# ── Processing dots ────────────────────────────────────────────────────────
+# ── Processing dots ───────────────────────────────────────────────────────
 
 def draw_proc_mask(w, h, frame, total_frames=12):
     """White dot silhouettes for blur mask."""
     pixels = []
-    num_dots = 3
-    dot_radius = min(w, h) * 0.22
-    dot_spacing = w * 0.22
+    num_dots = 5
+    dot_radius = min(w, h) * 0.20
+    dot_spacing = w * 0.16
     start_x = w / 2.0 - (num_dots - 1) * dot_spacing / 2.0
     cy = h / 2.0
-    phase_offset = [0, 0.33, 0.66]
+    phase_offset = [0, 0.2, 0.4, 0.6, 0.8]
 
     for py in range(h):
         for px in range(w):
@@ -347,15 +298,15 @@ def draw_proc_mask(w, h, frame, total_frames=12):
 
 
 def draw_proc_edge(w, h, frame, total_frames=12):
-    """Bold glass processing dots with edge highlights and indigo fill."""
+    """Glass processing dots with edge highlights and indigo fill."""
     pixels = []
-    num_dots = 3
-    dot_radius = min(w, h) * 0.22
-    dot_spacing = w * 0.22
+    num_dots = 5
+    dot_radius = min(w, h) * 0.20
+    dot_spacing = w * 0.16
     start_x = w / 2.0 - (num_dots - 1) * dot_spacing / 2.0
     cy = h / 2.0
-    phase_offset = [0, 0.33, 0.66]
-    stroke_w = 2.6  # pixels — +30% thicker edge
+    phase_offset = [0, 0.2, 0.4, 0.6, 0.8]
+    stroke_w = 2.6
 
     for py in range(h):
         for px in range(w):
@@ -374,7 +325,7 @@ def draw_proc_edge(w, h, frame, total_frames=12):
                 dist = math.sqrt((px + 0.5 - cx) ** 2 + (py + 0.5 - cy) ** 2)
                 edge = clamp(1.0 - abs(dist - r) / stroke_w) * opacity
                 fill = clamp(r - dist + 0.5) * opacity
-                glow = clamp(1.0 - max(0, dist - r) / 4.0) * 0.35 * opacity  # +30% glow
+                glow = clamp(1.0 - max(0, dist - r) / 4.0) * 0.35 * opacity
 
                 if edge > best_edge:
                     best_edge = edge
@@ -390,7 +341,6 @@ def draw_proc_edge(w, h, frame, total_frames=12):
                 a = int(clamp(best_edge * brightness) * 255)
                 pixels.append((rv, rv, rv, a))
             elif best_fill > 0.01:
-                # Indigo glass fill — +30% more opaque
                 a = int(clamp(best_fill * 0.60) * 255)
                 pixels.append((IND_R, IND_G, IND_B, a))
             elif best_glow > 0.01:
@@ -401,26 +351,24 @@ def draw_proc_edge(w, h, frame, total_frames=12):
     return pixels
 
 
-# ── Generate ───────────────────────────────────────────────────────────────
+# ── Generate ──────────────────────────────────────────────────────────────
 
-print("Generating glassmorphic waveform assets (light + dark variants)...")
+print("Generating glassmorphic waveform assets (light + dark, 22 bars)...")
 
 WAVE_W, WAVE_H = 96, 32
 for lvl in range(6):
     fill = lvl / 5.0
     for scale, suffix in [(1, ""), (2, "@2x")]:
         sw, sh = WAVE_W * scale, WAVE_H * scale
-        # Mask (bar shapes scale with level)
         px = draw_wave_mask(sw, sh, fill, level=lvl)
         write_png(ASSETS / f"wave_mask_{lvl}{suffix}.png", px, sw, sh)
-        # Light-bg edge highlights
         px = draw_wave_edge(sw, sh, fill, level=lvl)
         write_png(ASSETS / f"wave_edge_{lvl}{suffix}.png", px, sw, sh)
-        # Dark-bg edge highlights
         px = draw_wave_edge_dark(sw, sh, fill, level=lvl)
         write_png(ASSETS / f"wave_edge_dark_{lvl}{suffix}.png", px, sw, sh)
 
-PROC_W, PROC_H = 42, 18  # ~30% larger than original 32x14
+# 30% larger than 42x18, wider for 5 dots
+PROC_W, PROC_H = 55, 23
 PROC_FRAMES = 12
 for frame in range(PROC_FRAMES):
     for scale, suffix in [(1, ""), (2, "@2x")]:

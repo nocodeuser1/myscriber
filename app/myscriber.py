@@ -507,7 +507,7 @@ class MyScriber(rumps.App):
 
     # Overlay sizes (pt) — wave is 96x32, processing is 32x14
     WAVE_W, WAVE_H = 96, 32
-    PROC_W, PROC_H = 42, 18  # ~30% larger dots
+    PROC_W, PROC_H = 55, 23  # 5 dots, 30% larger
 
     def _load_wave_images(self):
         """Pre-load glassmorphic wave assets: mask images and edge highlights
