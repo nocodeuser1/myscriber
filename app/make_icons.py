@@ -268,7 +268,7 @@ def draw_menubar_volume(size, fill_level):
 
     # Downsample — TWO layers: black outline + indigo fill
     # pixels_hr stores (outline_alpha, fill_alpha) per hi-res pixel
-    IND_R, IND_G, IND_B = 90, 70, 215
+    IND_R, IND_G, IND_B = 80, 50, 230  # blue-violet for light bg menubar
 
     pixels = []
     for y in range(S):
@@ -352,8 +352,8 @@ def draw_menubar_volume_dark(size, fill_level):
 
             pixels_hr.append((alpha_outline, alpha_fill))
 
-    # Bright indigo for dark backgrounds
-    IND_R, IND_G, IND_B = 140, 100, 255
+    # Bright blue-violet for dark backgrounds
+    IND_R, IND_G, IND_B = 120, 80, 255
 
     pixels = []
     for y in range(S):

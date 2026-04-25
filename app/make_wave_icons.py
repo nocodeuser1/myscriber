@@ -21,8 +21,8 @@ from pathlib import Path
 ASSETS = Path(__file__).parent.parent / "assets"
 ASSETS.mkdir(exist_ok=True)
 
-# Electric indigo — vivid, saturated, luminous on any background
-IND_R, IND_G, IND_B = 140, 100, 255
+# Blue-violet — vivid, saturated, luminous on any background
+IND_R, IND_G, IND_B = 100, 60, 255
 
 # ── Minimal PNG writer ─────────────────────────────────────────────────────
 
@@ -56,8 +56,8 @@ def clamp(v, lo=0.0, hi=1.0):
 # 11 bars with varying max heights for waveform shape
 BAR_HEIGHTS_MAX = [0.30, 0.45, 0.55, 0.70, 0.85, 1.0, 0.85, 0.70, 0.55, 0.45, 0.30]
 NUM_BARS = len(BAR_HEIGHTS_MAX)
-BAR_W_FRAC = 0.065   # thick glass bars
-GAP_FRAC = 0.018     # tight gaps
+BAR_W_FRAC = 0.078   # wide glass bars — visible even on light backgrounds
+GAP_FRAC = 0.016     # tight gaps
 TOTAL_W = NUM_BARS * BAR_W_FRAC + (NUM_BARS - 1) * GAP_FRAC
 START_X = (1.0 - TOTAL_W) / 2.0
 
@@ -172,41 +172,41 @@ def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
     pixels = []
 
     if mode == "dark":
-        # Dark bg: bright luminous everything, high opacity, vivid indigo
-        stroke_w = 3.5 / w
+        # Dark bg: VERY bright luminous bars — must pop against dark wallpapers
+        stroke_w = 4.0 / w
+        glow_w = 16.0 / w          # wider glow halo
+        inner_glow_w = 9.0 / w
+        # Edges: bright vivid indigo
+        edge_fill_hot = 0.35        # mostly indigo with some white-hot
+        edge_glass_indigo = 0.3     # bright indigo on unfilled edges
+        edge_brightness_min = 0.85
+        # Body
+        fill_body_opacity = 0.97    # nearly opaque fill
+        fill_edge_boost = 0.15
+        glass_body_tint = 0.6       # 60% indigo tint on unfilled glass
+        glass_body_opacity = 0.55   # much more visible glass body
+        glass_edge_boost = 0.22
+        # Outer glow
+        fill_glow_opacity = 0.95
+        glass_glow_opacity = 0.65
+    else:
+        # Light bg: bold indigo outlines, vivid body against white
+        stroke_w = 4.0 / w
         glow_w = 12.0 / w
         inner_glow_w = 7.0 / w
-        # Edges: white-hot indigo
-        edge_fill_hot = 0.55        # less white, more indigo in fill zone edges
-        edge_glass_indigo = 0.5     # indigo tint on unfilled edges
-        edge_brightness_min = 0.7
+        # Edges: rich indigo (not white — white on white is invisible)
+        edge_fill_hot = 0.15        # mostly indigo, little white
+        edge_glass_indigo = 0.8     # strong indigo on unfilled edges
+        edge_brightness_min = 0.6
         # Body
-        fill_body_opacity = 0.92
+        fill_body_opacity = 0.95
         fill_edge_boost = 0.12
-        glass_body_tint = 0.5       # 50% indigo tint on unfilled glass
-        glass_body_opacity = 0.38
+        glass_body_tint = 0.65      # 65% indigo on unfilled glass
+        glass_body_opacity = 0.45   # more visible body
         glass_edge_boost = 0.18
         # Outer glow
         fill_glow_opacity = 0.85
         glass_glow_opacity = 0.5
-    else:
-        # Light bg: darker outlines, visible body against white
-        stroke_w = 3.5 / w
-        glow_w = 10.0 / w
-        inner_glow_w = 6.0 / w
-        # Edges: darker indigo (not white — white on white is invisible)
-        edge_fill_hot = 0.2         # mostly indigo, little white
-        edge_glass_indigo = 0.7     # strong indigo on unfilled edges
-        edge_brightness_min = 0.55
-        # Body
-        fill_body_opacity = 0.9
-        fill_edge_boost = 0.1
-        glass_body_tint = 0.55      # 55% indigo on unfilled glass
-        glass_body_opacity = 0.35
-        glass_edge_boost = 0.15
-        # Outer glow
-        fill_glow_opacity = 0.75
-        glass_glow_opacity = 0.4
 
     for py in range(h):
         for px in range(w):
@@ -420,7 +420,7 @@ for lvl in range(6):
         px = draw_wave_edge_dark(sw, sh, fill, level=lvl)
         write_png(ASSETS / f"wave_edge_dark_{lvl}{suffix}.png", px, sw, sh)
 
-PROC_W, PROC_H = 32, 14
+PROC_W, PROC_H = 42, 18  # ~30% larger than original 32x14
 PROC_FRAMES = 12
 for frame in range(PROC_FRAMES):
     for scale, suffix in [(1, ""), (2, "@2x")]:

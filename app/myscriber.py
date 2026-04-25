@@ -507,7 +507,7 @@ class MyScriber(rumps.App):
 
     # Overlay sizes (pt) — wave is 96x32, processing is 32x14
     WAVE_W, WAVE_H = 96, 32
-    PROC_W, PROC_H = 32, 14
+    PROC_W, PROC_H = 42, 18  # ~30% larger dots
 
     def _load_wave_images(self):
         """Pre-load glassmorphic wave assets: mask images and edge highlights
@@ -748,11 +748,12 @@ class MyScriber(rumps.App):
         self._last_waveform_update = now
         try:
             from PyObjCTools import AppHelper
-            if rms > 0.001:
+            if rms > 0.006:
                 db = 20.0 * math.log10(rms)
-                # More sensitive mapping: -50dB→1, -42dB→2, -34dB→3, -26dB→4, -18dB→5
-                # Normal speech is around -30 to -15 dB, so levels 3-5 fire easily
-                level = max(1, min(int((db + 50) / 8), 5))
+                # Compressed range: -40→1, -34→2, -28→3, -22→4, -16→5
+                # Higher gate (0.006 ≈ -44dB) kills ambient flutter,
+                # compressed 6dB steps make quiet speech hit level 2-3
+                level = max(1, min(int((db + 40) / 6), 5))
             else:
                 level = 0
             if level == self._last_wave_level:
@@ -1494,11 +1495,12 @@ class MyScriber(rumps.App):
             if _AH and app._volume_icons:
                 try:
                     rms = float(np.sqrt(np.mean(indata ** 2)))
-                    if rms > 0.002:
+                    if rms > 0.006:
                         # Logarithmic (dB) scale — matches human volume perception
-                        # Maps ~-54 dB to ~-14 dB onto levels 1-5
+                        # Higher gate (0.006 ≈ -44dB) kills ambient flutter
+                        # Compressed 7dB steps: -42→1, -35→2, -28→3, -21→4, -14→5
                         db = 20.0 * math.log10(rms)
-                        level = max(1, min(int((db + 54) / 8), 5))
+                        level = max(1, min(int((db + 42) / 7), 5))
                     else:
                         level = 0
                     if level != app._last_vol_level:
