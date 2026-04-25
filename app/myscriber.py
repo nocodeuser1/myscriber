@@ -1232,12 +1232,11 @@ class MyScriber(rumps.App):
                                 AppHelper.callAfter(app._stop_and_transcribe)
                             except Exception:
                                 app._stop_and_transcribe()
-                    # Suppress the hotkey event
-                    try:
-                        Quartz.CGEventSetType(event, kCGEventNull)
-                    except Exception:
-                        pass
-                    return event
+                    # Suppress the hotkey event — return None to swallow it
+                    # so the foreground app never sees it.
+                    # (CGEventSetType to null doesn't actually suppress;
+                    # returning None from the tap callback does.)
+                    return None
 
             except Exception as e:
                 log.error(f"CGEventTap callback error: {e}")
