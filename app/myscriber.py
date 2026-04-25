@@ -106,6 +106,7 @@ DEFAULT_CONFIG = {
     "language": "auto",
     "hotkey":   "cmd+l",
     "mode":     "push_to_talk",
+    "notifications": True,
 }
 
 
@@ -970,6 +971,12 @@ class MyScriber(rumps.App):
             "Set Hotkey…", callback=self._learn_hotkey,
         )
 
+        notif_on = self.config.get("notifications", True)
+        self.notif_item = rumps.MenuItem(
+            "Notifications: On" if notif_on else "Notifications: Off",
+            callback=self._toggle_notifications,
+        )
+
         self.menu = [
             self.status_item,
             None,
@@ -977,6 +984,8 @@ class MyScriber(rumps.App):
             self.mode_item,
             self.hotkey_display,
             self.set_hotkey_item,
+            None,
+            self.notif_item,
             None,
             rumps.MenuItem("Check for Updates…", callback=self._check_for_updates),
             rumps.MenuItem(f"Version {APP_VERSION}"),
@@ -1693,20 +1702,24 @@ class MyScriber(rumps.App):
                 log.info("Editable field confirmed — pasted directly, no notification")
             else:
                 # Detection uncertain — also show notification as safety net
-                log.info("Editable field not confirmed — pasted + showing notification")
-                preview = text[:80] + ("…" if len(text) > 80 else "")
-                self._notify(
-                    "myScriber",
-                    preview,
-                    subtitle="Copied to clipboard — click to edit",
-                    user_info={"action": "show_overlay", "text": text},
-                )
+                if self.config.get("notifications", True):
+                    log.info("Editable field not confirmed — pasted + showing notification")
+                    preview = text[:80] + ("…" if len(text) > 80 else "")
+                    self._notify(
+                        "myScriber",
+                        preview,
+                        subtitle="Copied to clipboard — click to edit",
+                        user_info={"action": "show_overlay", "text": text},
+                    )
+                else:
+                    log.info("Editable field not confirmed — pasted, notifications disabled")
         except Exception as e:
             log.error(f"Deliver text error: {e} — copying to clipboard")
             try:
                 proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
                 proc.communicate(text.encode("utf-8"))
-                self._notify("myScriber", "Copied to clipboard!")
+                if self.config.get("notifications", True):
+                    self._notify("myScriber", "Copied to clipboard!")
             except Exception:
                 pass
 
@@ -2568,6 +2581,34 @@ class MyScriber(rumps.App):
         save_config(self.config)
         self._stop_hotkey()
         self._register_hotkey()
+        # Re-open the menu so it doesn't disappear on click
+        self._reopen_menu()
+
+    def _toggle_notifications(self, _):
+        on = not self.config.get("notifications", True)
+        self.config["notifications"] = on
+        self.notif_item.title = "Notifications: On" if on else "Notifications: Off"
+        save_config(self.config)
+        log.info(f"Notifications {'enabled' if on else 'disabled'}")
+        # Re-open the menu so it doesn't disappear on click
+        self._reopen_menu()
+
+    def _reopen_menu(self):
+        """Re-open the menubar dropdown after a menu item click closes it."""
+        try:
+            from PyObjCTools import AppHelper
+            AppHelper.callLater(0.15, self._popup_menu)
+        except Exception as e:
+            log.debug(f"Could not schedule menu re-open: {e}")
+
+    def _popup_menu(self):
+        """Programmatically click the status bar button to re-open the menu."""
+        try:
+            btn = self._nsapp.nsstatusitem.button()
+            if btn:
+                btn.performClick_(None)
+        except Exception as e:
+            log.debug(f"Menu re-open click failed: {e}")
 
     def _make_model_setter(self, model_name):
         def _set(_):
