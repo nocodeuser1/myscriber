@@ -2,16 +2,19 @@
 """
 Generates waveform overlay and processing animation PNGs.
 
-Apple-style glassmorphism: bars have a frosted-glass look with white
-surrounds (visible on dark backgrounds) and indigo fill that intensifies
-with volume. Level 0 = ghost glass bars (no indigo, just faint outlines).
+Each volume level gets a white frosted-glass PANEL (rounded pill) behind
+the bars. The panel is always visible — even on pitch-black wallpapers —
+and grows taller with volume. Indigo bars sit inside the panel.
 
-22 thin bars (double the previous 11) for a denser, sleeker waveform.
+Level 0: panel with faint ghost bars (no indigo) — shows mic is listening.
+Level 1-5: panel grows, indigo bars fill and grow with volume.
+
+22 thin bars for a dense, sleek equalizer look.
 
 Outputs (in assets/):
-  wave_mask_0..5.png / @2x     — alpha mask for blur (shape silhouettes)
-  wave_edge_0..5.png / @2x     — edge highlights (light bg variant)
-  wave_edge_dark_0..5.png / @2x — edge highlights (dark bg variant)
+  wave_mask_0..5.png / @2x     — alpha mask for blur
+  wave_edge_0..5.png / @2x     — light-bg variant
+  wave_edge_dark_0..5.png / @2x — dark-bg variant (white glass panel)
   proc_mask_0..11.png / @2x    — processing dot masks
   proc_edge_0..11.png / @2x    — processing dot edge highlights
 """
@@ -22,8 +25,8 @@ from pathlib import Path
 ASSETS = Path(__file__).parent.parent / "assets"
 ASSETS.mkdir(exist_ok=True)
 
-# Blue-violet — punchy, saturated
-IND_R, IND_G, IND_B = 90, 40, 255
+# Bluer indigo — more blue, less purple
+IND_R, IND_G, IND_B = 55, 50, 255
 
 # ── Minimal PNG writer ─────────────────────────────────────────────────────
 
@@ -54,49 +57,78 @@ def clamp(v, lo=0.0, hi=1.0):
 
 # ── Bar geometry ──────────────────────────────────────────────────────────
 
-# 22 bars — smooth symmetric bell curve peaking at center
+# 22 bars — smooth symmetric bell curve
 BAR_HEIGHTS_MAX = [
     0.22, 0.30, 0.38, 0.46, 0.54, 0.62, 0.70, 0.78, 0.86, 0.94, 1.0,
     1.0, 0.94, 0.86, 0.78, 0.70, 0.62, 0.54, 0.46, 0.38, 0.30, 0.22,
 ]
-NUM_BARS = len(BAR_HEIGHTS_MAX)  # 22
-BAR_W_FRAC = 0.035   # thin bars — half the width, double the count
-GAP_FRAC = 0.008     # tight gaps between bars
+NUM_BARS = len(BAR_HEIGHTS_MAX)
+BAR_W_FRAC = 0.035
+GAP_FRAC = 0.008
 TOTAL_W = NUM_BARS * BAR_W_FRAC + (NUM_BARS - 1) * GAP_FRAC
 START_X = (1.0 - TOTAL_W) / 2.0
 
-# Per-level height scales — bars GROW with volume
 LEVEL_SCALES = [0.18, 0.35, 0.55, 0.72, 0.88, 1.0]
 
 _active_bar_heights = list(BAR_HEIGHTS_MAX)
 
 
 def set_level_scale(level):
-    """Set bar heights for a given volume level (0-5)."""
     global _active_bar_heights
     scale = LEVEL_SCALES[min(level, len(LEVEL_SCALES) - 1)]
-    min_h = 0.10  # minimum stub height
+    min_h = 0.10
     _active_bar_heights = [max(min_h, h * scale) for h in BAR_HEIGHTS_MAX]
 
 
 def bar_sdf(nx, ny, bar_idx):
-    """Signed distance to a bar in normalized coords. Negative = inside."""
     bh = _active_bar_heights[bar_idx]
     bx = START_X + bar_idx * (BAR_W_FRAC + GAP_FRAC)
     bw = BAR_W_FRAC
-
     bar_top = 0.5 - bh * 0.45
     bar_bot = 0.5 + bh * 0.45
     bar_cx = bx + bw / 2.0
     bar_cy = (bar_top + bar_bot) / 2.0
     bar_hw = bw / 2.0
     bar_hh = (bar_bot - bar_top) / 2.0
-
-    rx = bw * 0.45  # pill rounding
+    rx = bw * 0.45
     ry = rx
-
     dx = abs(nx - bar_cx) - (bar_hw - rx)
     dy = abs(ny - bar_cy) - (bar_hh - ry)
+    if dx <= 0 and dy <= 0:
+        return min(dx, dy)
+    elif dx > 0 and dy > 0:
+        return math.sqrt(dx * dx + dy * dy)
+    else:
+        return max(dx, dy)
+
+
+# ── Glass panel SDF ──────────────────────────────────────────────────────
+
+def panel_sdf(nx, ny, level):
+    """Signed distance to the glass panel — a rounded pill that encompasses
+    all bars at the current level, with padding. Grows taller with volume."""
+    # Horizontal: spans all bars with padding
+    pad_x = 0.025
+    panel_left = START_X - pad_x
+    panel_right = START_X + TOTAL_W + pad_x
+
+    # Vertical: grows with volume level
+    # Find the tallest bar at this level to set panel height
+    max_bh = max(_active_bar_heights)
+    pad_y = 0.06
+    panel_top = 0.5 - max_bh * 0.45 - pad_y
+    panel_bot = 0.5 + max_bh * 0.45 + pad_y
+
+    panel_cx = (panel_left + panel_right) / 2.0
+    panel_cy = (panel_top + panel_bot) / 2.0
+    panel_hw = (panel_right - panel_left) / 2.0
+    panel_hh = (panel_bot - panel_top) / 2.0
+
+    # Rounded rect with generous corner radius
+    corner_r = min(panel_hw, panel_hh) * 0.6
+
+    dx = abs(nx - panel_cx) - (panel_hw - corner_r)
+    dy = abs(ny - panel_cy) - (panel_hh - corner_r)
 
     if dx <= 0 and dy <= 0:
         return min(dx, dy)
@@ -106,23 +138,34 @@ def bar_sdf(nx, ny, bar_idx):
         return max(dx, dy)
 
 
-# ── Wave mask (white silhouette for blur masking) ─────────────────────────
+# ── Wave mask ────────────────────────────────────────────────────────────
 
 def draw_wave_mask(w, h, fill_level, level=0):
+    """White panel + bar silhouettes for blur mask."""
     set_level_scale(level)
     pixels = []
     for py in range(h):
         for px in range(w):
             nx = (px + 0.5) / w
             ny = (py + 0.5) / h
-            best_alpha = 0.0
+
+            # Panel shape
+            pd = panel_sdf(nx, ny, level)
+            panel_alpha = clamp(0.5 - pd * w)
+
+            # Bar shapes
+            bar_alpha = 0.0
             for i in range(NUM_BARS):
                 d = bar_sdf(nx, ny, i)
                 aa = clamp(0.5 - d * w)
-                if aa > best_alpha:
-                    best_alpha = aa
-            if best_alpha > 0.001:
-                a = int(clamp(best_alpha) * 255)
+                if aa > bar_alpha:
+                    bar_alpha = aa
+
+            # Combine: panel at lower opacity + bars at full
+            combined = max(panel_alpha * 0.5, bar_alpha)
+
+            if combined > 0.001:
+                a = int(clamp(combined) * 255)
                 pixels.append((255, 255, 255, a))
             else:
                 pixels.append((0, 0, 0, 0))
@@ -132,17 +175,17 @@ def draw_wave_mask(w, h, fill_level, level=0):
 # ── Wave edge highlights ─────────────────────────────────────────────────
 
 def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
-    """Render glass wave bars.
+    """Render glass panel + wave bars.
 
-    mode="dark"  → white surround + indigo fill (visible on dark wallpapers)
-    mode="light" → indigo outlines + indigo fill (visible on light bg)
+    Dark mode: white frosted-glass panel behind bars, white bar outlines,
+    indigo fill. The panel ensures visibility on any dark wallpaper.
 
-    Level 0 = ghost glass bars (faint outline, no indigo fill — just shows
-    that the mic is listening). Level 1+ = indigo fills the bars.
+    Light mode: subtle panel tint, indigo bar outlines and fill.
+
+    Level 0 = ghost (panel visible, bars faint, no indigo).
     """
     set_level_scale(level)
 
-    # Level 1+ always fully filled — height IS the feedback
     if level >= 1:
         fill_level = 1.0
 
@@ -150,126 +193,109 @@ def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
 
     pixels = []
 
+    # Panel rendering params
     if mode == "dark":
-        # ── Dark background parameters ──
-        stroke_w = 3.0 / w
-        white_glow_w = 14.0 / w      # white halo around bars
-        inner_glow_w = 6.0 / w
-
-        if is_ghost:
-            # Ghost: faint white outlines, no fill
-            edge_r, edge_g, edge_b = 255, 255, 255
-            edge_opacity = 0.45
-            body_opacity = 0.08       # barely-there glass body
-            body_r, body_g, body_b = 255, 255, 255
-            glow_opacity = 0.15
-            glow_r, glow_g, glow_b = 200, 200, 255  # hint of blue
-        else:
-            # Active: white surround + indigo fill
-            edge_r, edge_g, edge_b = 255, 255, 255
-            edge_opacity = 0.95
-            body_r, body_g, body_b = IND_R, IND_G, IND_B
-            body_opacity = 0.95
-            glow_r, glow_g, glow_b = 255, 255, 255
-            glow_opacity = 0.55
+        panel_stroke_w = 2.5 / w
+        panel_body_opacity = 0.22 if is_ghost else (0.18 + 0.08 * min(level, 5))
+        panel_edge_opacity = 0.50 if is_ghost else (0.45 + 0.10 * min(level, 5))
+        panel_glow_w = 8.0 / w
+        panel_glow_opacity = 0.20 if is_ghost else (0.15 + 0.08 * min(level, 5))
+        # Panel color: white
+        pr, pg, pb = 255, 255, 255
     else:
-        # ── Light background parameters ──
-        stroke_w = 3.0 / w
-        white_glow_w = 10.0 / w
-        inner_glow_w = 5.0 / w
+        panel_stroke_w = 1.5 / w
+        panel_body_opacity = 0.06 if is_ghost else (0.04 + 0.03 * min(level, 5))
+        panel_edge_opacity = 0.15 if is_ghost else (0.12 + 0.06 * min(level, 5))
+        panel_glow_w = 5.0 / w
+        panel_glow_opacity = 0.05
+        # Panel color: indigo-tinted
+        pr, pg, pb = IND_R, IND_G, IND_B
 
-        if is_ghost:
-            # Ghost: faint indigo outlines
-            edge_r, edge_g, edge_b = IND_R, IND_G, IND_B
-            edge_opacity = 0.30
-            body_opacity = 0.06
-            body_r, body_g, body_b = IND_R, IND_G, IND_B
-            glow_opacity = 0.10
-            glow_r, glow_g, glow_b = IND_R, IND_G, IND_B
-        else:
-            # Active: deep indigo
-            edge_r, edge_g, edge_b = IND_R, IND_G, IND_B
-            edge_opacity = 0.95
-            body_r, body_g, body_b = IND_R, IND_G, IND_B
-            body_opacity = 0.90
-            glow_r, glow_g, glow_b = IND_R, IND_G, IND_B
-            glow_opacity = 0.45
+    # Bar rendering params
+    bar_stroke_w = 2.5 / w
 
     for py in range(h):
         for px in range(w):
             nx = (px + 0.5) / w
             ny = (py + 0.5) / h
 
-            best_edge = 0.0
-            best_inside = 0.0
-            best_glow = 0.0
-            best_inner_glow = 0.0
+            # ── Panel layer ──
+            pd = panel_sdf(nx, ny, level)
+            p_edge = clamp(1.0 - abs(pd) / panel_stroke_w)
+            p_inside = clamp(0.5 - pd * w)
+            p_glow = 0.0
+            if pd > 0:
+                p_glow = clamp(1.0 - pd / panel_glow_w) ** 2 * 0.5
+
+            # ── Bar layer ──
+            best_bar_edge = 0.0
+            best_bar_inside = 0.0
 
             for i in range(NUM_BARS):
                 d = bar_sdf(nx, ny, i)
+                be = clamp(1.0 - abs(d) / bar_stroke_w)
+                bi = clamp(0.5 - d * w)
+                if be > best_bar_edge:
+                    best_bar_edge = be
+                if bi > best_bar_inside:
+                    best_bar_inside = bi
 
-                edge_alpha = clamp(1.0 - abs(d) / stroke_w)
-                inside_alpha = clamp(0.5 - d * w)
-                glow_alpha = 0.0
-                if d > 0:
-                    glow_alpha = clamp(1.0 - d / white_glow_w) ** 1.5 * 0.6
-                inner_glow = 0.0
-                if d < 0:
-                    inner_glow = clamp(1.0 - (-d) / inner_glow_w)
-
-                if edge_alpha > best_edge:
-                    best_edge = edge_alpha
-                if inside_alpha > best_inside:
-                    best_inside = inside_alpha
-                if glow_alpha > best_glow:
-                    best_glow = glow_alpha
-                if inner_glow > best_inner_glow:
-                    best_inner_glow = inner_glow
-
+            # ── Composite: bars on top of panel ──
             r, g, b, a = 0, 0, 0, 0
 
-            if best_edge > 0.01:
-                # Edge stroke
-                brightness = 1.0
-                r, g, b = edge_r, edge_g, edge_b
-                # Inner glow brightens edge slightly
-                boost = 0.15 * best_inner_glow
-                r = min(255, int(r + boost * 255))
-                g = min(255, int(g + boost * 255))
-                b = min(255, int(b + boost * 255))
-                a = int(clamp(best_edge * edge_opacity) * 255)
+            if best_bar_edge > 0.01:
+                if is_ghost:
+                    # Ghost: faint outlines
+                    if mode == "dark":
+                        r, g, b = 200, 200, 220
+                        a = int(clamp(best_bar_edge * 0.35) * 255)
+                    else:
+                        r, g, b = IND_R, IND_G, IND_B
+                        a = int(clamp(best_bar_edge * 0.25) * 255)
+                else:
+                    # Active: indigo edges with a bright highlight
+                    # Mix indigo with a white highlight on top half
+                    bright = 0.3  # 30% white highlight
+                    r = min(255, int(IND_R * (1 - bright) + 255 * bright))
+                    g = min(255, int(IND_G * (1 - bright) + 255 * bright))
+                    b = min(255, int(IND_B * (1 - bright) + 255 * bright))
+                    a = int(clamp(best_bar_edge * 0.95) * 255)
 
-            elif best_inside > 0.01:
-                # Body fill
-                glow_boost = 0.2 * best_inner_glow
-                r = min(255, int(body_r + glow_boost * 255))
-                g = min(255, int(body_g + glow_boost * 255))
-                b = min(255, int(body_b + glow_boost * 255))
-                a = int(clamp(best_inside * body_opacity) * 255)
+            elif best_bar_inside > 0.01 and not is_ghost:
+                # Bar body fill — solid indigo
+                r, g, b = IND_R, IND_G, IND_B
+                a = int(clamp(best_bar_inside * 0.95) * 255)
 
-            elif best_glow > 0.01:
-                # Outer glow halo
-                r, g, b = glow_r, glow_g, glow_b
-                a = int(clamp(best_glow * glow_opacity) * 255)
+            elif p_edge > 0.01:
+                # Panel edge
+                r, g, b = pr, pg, pb
+                a = int(clamp(p_edge * panel_edge_opacity) * 255)
+
+            elif p_inside > 0.01:
+                # Panel body
+                r, g, b = pr, pg, pb
+                a = int(clamp(p_inside * panel_body_opacity) * 255)
+
+            elif p_glow > 0.01:
+                # Panel outer glow
+                r, g, b = pr, pg, pb
+                a = int(clamp(p_glow * panel_glow_opacity) * 255)
 
             pixels.append((r, g, b, a))
     return pixels
 
 
 def draw_wave_edge(w, h, fill_level, level=0):
-    """Light-background variant."""
     return _render_wave_edge(w, h, fill_level, mode="light", level=level)
 
 
 def draw_wave_edge_dark(w, h, fill_level, level=0):
-    """Dark-background variant — white surround + indigo glass."""
     return _render_wave_edge(w, h, fill_level, mode="dark", level=level)
 
 
 # ── Processing dots ───────────────────────────────────────────────────────
 
 def draw_proc_mask(w, h, frame, total_frames=12):
-    """White dot silhouettes for blur mask."""
     pixels = []
     num_dots = 5
     dot_radius = min(w, h) * 0.20
@@ -298,7 +324,6 @@ def draw_proc_mask(w, h, frame, total_frames=12):
 
 
 def draw_proc_edge(w, h, frame, total_frames=12):
-    """Glass processing dots with edge highlights and indigo fill."""
     pixels = []
     num_dots = 5
     dot_radius = min(w, h) * 0.20
@@ -353,7 +378,7 @@ def draw_proc_edge(w, h, frame, total_frames=12):
 
 # ── Generate ──────────────────────────────────────────────────────────────
 
-print("Generating glassmorphic waveform assets (light + dark, 22 bars)...")
+print("Generating glassmorphic waveform assets (panel + 22 bars)...")
 
 WAVE_W, WAVE_H = 96, 32
 for lvl in range(6):
@@ -367,7 +392,6 @@ for lvl in range(6):
         px = draw_wave_edge_dark(sw, sh, fill, level=lvl)
         write_png(ASSETS / f"wave_edge_dark_{lvl}{suffix}.png", px, sw, sh)
 
-# 30% larger than 42x18, wider for 5 dots
 PROC_W, PROC_H = 55, 23
 PROC_FRAMES = 12
 for frame in range(PROC_FRAMES):
