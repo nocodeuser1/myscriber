@@ -1092,17 +1092,17 @@ class MyScriber(rumps.App):
     def _register_hotkey(self):
         """Register the global hotkey.
 
-        Push-to-talk mode uses a native macOS CGEventTap so we can
-        *suppress* the key event — no stray characters get typed.
-        Toggle mode uses pynput GlobalHotKeys (suppression not needed).
+        Always uses CGEventTap first — it suppresses the key event so the
+        foreground app never sees it (e.g. Cmd+L won't open Chrome's
+        address bar). Falls back to pynput only if CGEventTap fails
+        (usually means Accessibility permission not granted).
         """
         # Always tear down existing listeners first to prevent duplicates
         self._stop_hotkey()
 
-        if self.config["mode"] == "push_to_talk":
-            if self._register_hotkey_eventtap():
-                return  # success
-            log.warning("CGEventTap failed — falling back to pynput")
+        if self._register_hotkey_eventtap():
+            return  # success — CGEventTap handles both toggle and push-to-talk
+        log.warning("CGEventTap failed — falling back to pynput (no key suppression)")
         self._register_hotkey_pynput()
 
     # ── CGEventTap implementation (push-to-talk, suppresses keys) ────────
@@ -1154,10 +1154,22 @@ class MyScriber(rumps.App):
                 wait_for_up["active"] = True  # ignore repeats until real key-up
                 app._stop_and_transcribe()
 
+        is_toggle = (app.config.get("mode") == "toggle")
+
+        def _suppress(event):
+            """Neuter the event so the foreground app never sees it."""
+            try:
+                Quartz.CGEventSetType(event, kCGEventNull)
+                Quartz.CGEventSetIntegerValueField(
+                    event, kCGKeyboardEventKeycode, 0xFFFF
+                )
+            except Exception:
+                pass
+            return event
+
         def _tap_cb(proxy, etype, event, refcon):
             # CRITICAL: This callback must be FAST.  macOS disables the
             # event tap if the callback takes too long (~10 s budget).
-            # Avoid logging on key-repeat events; keep the hot path minimal.
             try:
                 # Re-enable tap if macOS disabled it (callback took too long)
                 if etype == Quartz.kCGEventTapDisabledByTimeout:
@@ -1166,15 +1178,15 @@ class MyScriber(rumps.App):
                     return event
 
                 # Handle modifier-only release (user lifts Cmd before L)
+                # Only relevant for push-to-talk (stop on modifier release)
                 if etype == Quartz.kCGEventFlagsChanged:
-                    if pressed["down"]:
+                    if not is_toggle and pressed["down"]:
                         flags = Quartz.CGEventGetFlags(event)
                         mods = flags & 0x00FF0000
                         if (mods & mod_mask) != mod_mask:
                             pressed["down"] = False
                             _cancel_safety_timer()
                             log.info("Modifier released — stop recording")
-                            # Dispatch off the CGEventTap callback to avoid deadlock
                             try:
                                 from PyObjCTools import AppHelper
                                 AppHelper.callAfter(app._stop_and_transcribe)
@@ -1187,63 +1199,72 @@ class MyScriber(rumps.App):
 
                 kc = Quartz.CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
                 flags = Quartz.CGEventGetFlags(event)
-                mods = flags & 0x00FF0000  # isolate modifier bits
+                mods = flags & 0x00FF0000
 
                 if kc == keycode and (mods & mod_mask) == mod_mask:
-                    if etype == Quartz.kCGEventKeyDown:
-                        if wait_for_up["active"]:
-                            pass  # swallow repeats after safety stop
-                        elif not pressed["down"]:
-                            # First press — start recording
-                            pressed["down"] = True
-                            _cancel_safety_timer()  # cancel any stale timer
-                            log.info("Hotkey DOWN — start recording")
-                            # CRITICAL: Dispatch via callAfter, NOT synchronously.
-                            # _start_recording opens a Core Audio stream which
-                            # may need the main run loop. If we call it inline
-                            # from the CGEventTap callback, the run loop is
-                            # blocked → Core Audio deadlocks → app freezes.
-                            try:
-                                from PyObjCTools import AppHelper
-                                AppHelper.callAfter(app._start_recording)
-                            except Exception:
-                                app._start_recording()
-                            def _safety_timeout():
-                                if pressed["down"] and app.recording:
+                    if is_toggle:
+                        # ── Toggle mode: key-down toggles recording on/off ──
+                        if etype == Quartz.kCGEventKeyDown:
+                            if wait_for_up["active"]:
+                                pass  # swallow repeats
+                            elif not pressed["down"]:
+                                pressed["down"] = True  # debounce key-repeat
+                                if app.recording:
+                                    log.info("Toggle hotkey — stop recording")
                                     try:
                                         from PyObjCTools import AppHelper
-                                        AppHelper.callAfter(_safety_stop)
+                                        AppHelper.callAfter(app._stop_and_transcribe)
                                     except Exception:
-                                        _safety_stop()
-                            t = threading.Timer(MAX_RECORD_SECS, _safety_timeout)
-                            t.daemon = True
-                            t.start()
-                            safety_timer["ref"] = t
-                        # else: key-repeat while held — ignore silently (no log)
-                    else:  # kCGEventKeyUp
-                        wait_for_up["active"] = False
-                        if pressed["down"]:
+                                        app._stop_and_transcribe()
+                                else:
+                                    log.info("Toggle hotkey — start recording")
+                                    try:
+                                        from PyObjCTools import AppHelper
+                                        AppHelper.callAfter(app._start_recording)
+                                    except Exception:
+                                        app._start_recording()
+                        else:  # kCGEventKeyUp
                             pressed["down"] = False
-                            _cancel_safety_timer()
-                            log.info("Hotkey UP — stop recording")
-                            # Dispatch off the CGEventTap callback to avoid deadlock
-                            try:
-                                from PyObjCTools import AppHelper
-                                AppHelper.callAfter(app._stop_and_transcribe)
-                            except Exception:
-                                app._stop_and_transcribe()
-                    # Suppress the hotkey event so the foreground app
-                    # never sees it.  PyObjC doesn't reliably bridge
-                    # Python None → C NULL for CGEventRef returns, so
-                    # we neuter the event type AND zero its keycode.
-                    try:
-                        Quartz.CGEventSetType(event, kCGEventNull)
-                        Quartz.CGEventSetIntegerValueField(
-                            event, kCGKeyboardEventKeycode, 0xFFFF
-                        )
-                    except Exception:
-                        pass
-                    return event
+                            wait_for_up["active"] = False
+                    else:
+                        # ── Push-to-talk: hold to record, release to stop ──
+                        if etype == Quartz.kCGEventKeyDown:
+                            if wait_for_up["active"]:
+                                pass
+                            elif not pressed["down"]:
+                                pressed["down"] = True
+                                _cancel_safety_timer()
+                                log.info("Hotkey DOWN — start recording")
+                                try:
+                                    from PyObjCTools import AppHelper
+                                    AppHelper.callAfter(app._start_recording)
+                                except Exception:
+                                    app._start_recording()
+                                def _safety_timeout():
+                                    if pressed["down"] and app.recording:
+                                        try:
+                                            from PyObjCTools import AppHelper
+                                            AppHelper.callAfter(_safety_stop)
+                                        except Exception:
+                                            _safety_stop()
+                                t = threading.Timer(MAX_RECORD_SECS, _safety_timeout)
+                                t.daemon = True
+                                t.start()
+                                safety_timer["ref"] = t
+                        else:  # kCGEventKeyUp
+                            wait_for_up["active"] = False
+                            if pressed["down"]:
+                                pressed["down"] = False
+                                _cancel_safety_timer()
+                                log.info("Hotkey UP — stop recording")
+                                try:
+                                    from PyObjCTools import AppHelper
+                                    AppHelper.callAfter(app._stop_and_transcribe)
+                                except Exception:
+                                    app._stop_and_transcribe()
+
+                    # ALWAYS suppress the hotkey — both modes
+                    return _suppress(event)
 
             except Exception as e:
                 log.error(f"CGEventTap callback error: {e}")
