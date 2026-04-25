@@ -21,8 +21,8 @@ from pathlib import Path
 ASSETS = Path(__file__).parent.parent / "assets"
 ASSETS.mkdir(exist_ok=True)
 
-# Blue-violet — vivid, saturated, luminous on any background
-IND_R, IND_G, IND_B = 100, 60, 255
+# Blue-violet — punchy, saturated, luminous on any background
+IND_R, IND_G, IND_B = 90, 40, 255
 
 # ── Minimal PNG writer ─────────────────────────────────────────────────────
 
@@ -56,8 +56,8 @@ def clamp(v, lo=0.0, hi=1.0):
 # 11 bars with varying max heights for waveform shape
 BAR_HEIGHTS_MAX = [0.30, 0.45, 0.55, 0.70, 0.85, 1.0, 0.85, 0.70, 0.55, 0.45, 0.30]
 NUM_BARS = len(BAR_HEIGHTS_MAX)
-BAR_W_FRAC = 0.078   # wide glass bars — visible even on light backgrounds
-GAP_FRAC = 0.016     # tight gaps
+BAR_W_FRAC = 0.092   # chunky glass bars — unmissable on any background
+GAP_FRAC = 0.014     # tight gaps
 TOTAL_W = NUM_BARS * BAR_W_FRAC + (NUM_BARS - 1) * GAP_FRAC
 START_X = (1.0 - TOTAL_W) / 2.0
 
@@ -172,41 +172,41 @@ def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
     pixels = []
 
     if mode == "dark":
-        # Dark bg: VERY bright luminous bars — must pop against dark wallpapers
-        stroke_w = 4.0 / w
-        glow_w = 16.0 / w          # wider glow halo
-        inner_glow_w = 9.0 / w
-        # Edges: bright vivid indigo
-        edge_fill_hot = 0.35        # mostly indigo with some white-hot
-        edge_glass_indigo = 0.3     # bright indigo on unfilled edges
-        edge_brightness_min = 0.85
+        # Dark bg: MAXIMUM luminosity — bars must glow against any dark wallpaper
+        stroke_w = 5.2 / w          # +30% thicker edges
+        glow_w = 21.0 / w           # +30% wider glow halo
+        inner_glow_w = 12.0 / w     # +30% inner glow
+        # Edges: blazing bright
+        edge_fill_hot = 0.45        # hotter white mix on filled edges
+        edge_glass_indigo = 0.2     # brighter (less tint = more white) unfilled edges
+        edge_brightness_min = 0.95  # almost full brightness floor
         # Body
-        fill_body_opacity = 0.97    # nearly opaque fill
-        fill_edge_boost = 0.15
-        glass_body_tint = 0.6       # 60% indigo tint on unfilled glass
-        glass_body_opacity = 0.55   # much more visible glass body
-        glass_edge_boost = 0.22
+        fill_body_opacity = 1.0     # fully opaque fill
+        fill_edge_boost = 0.20
+        glass_body_tint = 0.7       # 70% indigo tint on unfilled glass
+        glass_body_opacity = 0.72   # +30% glass body visibility
+        glass_edge_boost = 0.28
         # Outer glow
-        fill_glow_opacity = 0.95
-        glass_glow_opacity = 0.65
+        fill_glow_opacity = 1.0     # max glow
+        glass_glow_opacity = 0.85
     else:
-        # Light bg: bold indigo outlines, vivid body against white
-        stroke_w = 4.0 / w
-        glow_w = 12.0 / w
-        inner_glow_w = 7.0 / w
-        # Edges: rich indigo (not white — white on white is invisible)
-        edge_fill_hot = 0.15        # mostly indigo, little white
-        edge_glass_indigo = 0.8     # strong indigo on unfilled edges
-        edge_brightness_min = 0.6
+        # Light bg: punchy indigo — unmissable against white/light
+        stroke_w = 5.2 / w          # +30% thicker edges
+        glow_w = 16.0 / w           # +30% glow spread
+        inner_glow_w = 9.0 / w      # +30% inner glow
+        # Edges: deep rich indigo
+        edge_fill_hot = 0.10        # almost pure indigo edges
+        edge_glass_indigo = 0.9     # very strong indigo on unfilled edges
+        edge_brightness_min = 0.7
         # Body
-        fill_body_opacity = 0.95
-        fill_edge_boost = 0.12
-        glass_body_tint = 0.65      # 65% indigo on unfilled glass
-        glass_body_opacity = 0.45   # more visible body
-        glass_edge_boost = 0.18
+        fill_body_opacity = 1.0     # fully opaque
+        fill_edge_boost = 0.16
+        glass_body_tint = 0.8       # 80% indigo on unfilled glass
+        glass_body_opacity = 0.60   # +30% body visibility
+        glass_edge_boost = 0.24
         # Outer glow
-        fill_glow_opacity = 0.85
-        glass_glow_opacity = 0.5
+        fill_glow_opacity = 1.0
+        glass_glow_opacity = 0.65
 
     for py in range(h):
         for px in range(w):
@@ -355,7 +355,7 @@ def draw_proc_edge(w, h, frame, total_frames=12):
     start_x = w / 2.0 - (num_dots - 1) * dot_spacing / 2.0
     cy = h / 2.0
     phase_offset = [0, 0.33, 0.66]
-    stroke_w = 2.0  # pixels — bold edge
+    stroke_w = 2.6  # pixels — +30% thicker edge
 
     for py in range(h):
         for px in range(w):
@@ -374,7 +374,7 @@ def draw_proc_edge(w, h, frame, total_frames=12):
                 dist = math.sqrt((px + 0.5 - cx) ** 2 + (py + 0.5 - cy) ** 2)
                 edge = clamp(1.0 - abs(dist - r) / stroke_w) * opacity
                 fill = clamp(r - dist + 0.5) * opacity
-                glow = clamp(1.0 - max(0, dist - r) / 3.0) * 0.25 * opacity
+                glow = clamp(1.0 - max(0, dist - r) / 4.0) * 0.35 * opacity  # +30% glow
 
                 if edge > best_edge:
                     best_edge = edge
@@ -385,13 +385,13 @@ def draw_proc_edge(w, h, frame, total_frames=12):
                     best_glow = glow
 
             if best_edge > 0.01:
-                brightness = 1.0 if best_top else 0.65
+                brightness = 1.0 if best_top else 0.7
                 rv = int(255 * brightness)
                 a = int(clamp(best_edge * brightness) * 255)
                 pixels.append((rv, rv, rv, a))
             elif best_fill > 0.01:
-                # Indigo glass fill
-                a = int(clamp(best_fill * 0.45) * 255)
+                # Indigo glass fill — +30% more opaque
+                a = int(clamp(best_fill * 0.60) * 255)
                 pixels.append((IND_R, IND_G, IND_B, a))
             elif best_glow > 0.01:
                 a = int(clamp(best_glow) * 255)
