@@ -195,20 +195,32 @@ def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
 
     # Panel rendering params
     if mode == "dark":
-        panel_stroke_w = 2.5 / w
-        panel_body_opacity = 0.22 if is_ghost else (0.18 + 0.08 * min(level, 5))
-        panel_edge_opacity = 0.50 if is_ghost else (0.45 + 0.10 * min(level, 5))
-        panel_glow_w = 8.0 / w
-        panel_glow_opacity = 0.20 if is_ghost else (0.15 + 0.08 * min(level, 5))
-        # Panel color: white
+        panel_stroke_w = 3.0 / w
+        if is_ghost:
+            # LISTENING STATE: bold white glass pill — must be obvious
+            panel_body_opacity = 0.40   # clearly visible frosted glass
+            panel_edge_opacity = 0.85   # bright white edge
+            panel_glow_w = 12.0 / w
+            panel_glow_opacity = 0.30   # visible halo
+        else:
+            panel_body_opacity = 0.18 + 0.08 * min(level, 5)
+            panel_edge_opacity = 0.45 + 0.10 * min(level, 5)
+            panel_glow_w = 8.0 / w
+            panel_glow_opacity = 0.15 + 0.08 * min(level, 5)
         pr, pg, pb = 255, 255, 255
     else:
-        panel_stroke_w = 1.5 / w
-        panel_body_opacity = 0.06 if is_ghost else (0.04 + 0.03 * min(level, 5))
-        panel_edge_opacity = 0.15 if is_ghost else (0.12 + 0.06 * min(level, 5))
-        panel_glow_w = 5.0 / w
-        panel_glow_opacity = 0.05
-        # Panel color: indigo-tinted
+        panel_stroke_w = 2.0 / w
+        if is_ghost:
+            # LISTENING STATE on light bg: visible indigo-tinted pill
+            panel_body_opacity = 0.12
+            panel_edge_opacity = 0.35
+            panel_glow_w = 6.0 / w
+            panel_glow_opacity = 0.10
+        else:
+            panel_body_opacity = 0.04 + 0.03 * min(level, 5)
+            panel_edge_opacity = 0.12 + 0.06 * min(level, 5)
+            panel_glow_w = 5.0 / w
+            panel_glow_opacity = 0.05
         pr, pg, pb = IND_R, IND_G, IND_B
 
     # Bar rendering params
@@ -245,13 +257,13 @@ def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
 
             if best_bar_edge > 0.01:
                 if is_ghost:
-                    # Ghost: faint outlines
+                    # Listening: visible bar outlines inside the glass pill
                     if mode == "dark":
-                        r, g, b = 200, 200, 220
-                        a = int(clamp(best_bar_edge * 0.35) * 255)
+                        r, g, b = 255, 255, 255
+                        a = int(clamp(best_bar_edge * 0.60) * 255)
                     else:
                         r, g, b = IND_R, IND_G, IND_B
-                        a = int(clamp(best_bar_edge * 0.25) * 255)
+                        a = int(clamp(best_bar_edge * 0.40) * 255)
                 else:
                     # Active: indigo edges with a bright highlight
                     # Mix indigo with a white highlight on top half
