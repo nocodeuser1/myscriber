@@ -1232,11 +1232,18 @@ class MyScriber(rumps.App):
                                 AppHelper.callAfter(app._stop_and_transcribe)
                             except Exception:
                                 app._stop_and_transcribe()
-                    # Suppress the hotkey event — return None to swallow it
-                    # so the foreground app never sees it.
-                    # (CGEventSetType to null doesn't actually suppress;
-                    # returning None from the tap callback does.)
-                    return None
+                    # Suppress the hotkey event so the foreground app
+                    # never sees it.  PyObjC doesn't reliably bridge
+                    # Python None → C NULL for CGEventRef returns, so
+                    # we neuter the event type AND zero its keycode.
+                    try:
+                        Quartz.CGEventSetType(event, kCGEventNull)
+                        Quartz.CGEventSetIntegerValueField(
+                            event, kCGKeyboardEventKeycode, 0xFFFF
+                        )
+                    except Exception:
+                        pass
+                    return event
 
             except Exception as e:
                 log.error(f"CGEventTap callback error: {e}")
