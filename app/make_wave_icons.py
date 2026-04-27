@@ -195,13 +195,13 @@ def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
 
     # Panel rendering params
     if mode == "dark":
-        panel_stroke_w = 3.0 / w
+        panel_stroke_w = 3.5 / w
         if is_ghost:
-            # LISTENING STATE: bold white glass pill — must be obvious
-            panel_body_opacity = 0.40   # clearly visible frosted glass
-            panel_edge_opacity = 0.85   # bright white edge
-            panel_glow_w = 12.0 / w
-            panel_glow_opacity = 0.30   # visible halo
+            # LISTENING STATE: glowing white glass pill — unmistakable
+            panel_body_opacity = 0.45   # clearly visible frosted glass
+            panel_edge_opacity = 0.90   # bright white border
+            panel_glow_w = 28.0 / w     # wide bloom around the pill
+            panel_glow_opacity = 0.50   # strong white glow
         else:
             panel_body_opacity = 0.18 + 0.08 * min(level, 5)
             panel_edge_opacity = 0.45 + 0.10 * min(level, 5)
@@ -237,7 +237,9 @@ def _render_wave_edge(w, h, fill_level, mode="dark", level=0):
             p_inside = clamp(0.5 - pd * w)
             p_glow = 0.0
             if pd > 0:
-                p_glow = clamp(1.0 - pd / panel_glow_w) ** 2 * 0.5
+                # Softer falloff for ghost mode → wider visible bloom
+                exp = 1.3 if is_ghost else 2.0
+                p_glow = clamp(1.0 - pd / panel_glow_w) ** exp * 0.7
 
             # ── Bar layer ──
             best_bar_edge = 0.0
