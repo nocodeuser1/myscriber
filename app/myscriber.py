@@ -1538,68 +1538,129 @@ class MyScriber(rumps.App):
                 except Exception:
                     pass
 
-        try:
-            log.info("Opening audio stream...")
-            self.stream = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=CHANNELS,
-                dtype="float32", callback=callback,
-            )
-            log.info("Starting audio stream...")
-            self.stream.start()
-            log.info("Audio stream started successfully")
-        except Exception as e1:
-            log.warning(f"Default device failed: {e1} — trying PortAudio reset + fallback")
-            self.stream = None
-            # PortAudio can get into a stale state after sleep/wake,
-            # Bluetooth changes, or device switches.  Reset and retry.
+        # ── Open audio stream on a background thread so the main
+        #    (NSApplication) thread never blocks if PortAudio hangs.
+        #    The thread calls back to the main thread on success/failure.
+        STREAM_TIMEOUT = 8  # seconds
+
+        def _open_stream_thread():
+            """Try to open an audio stream. Runs in a daemon thread.
+            On completion, dispatches result back to the main thread."""
+            stream = None
             try:
-                sd._terminate()
-                sd._initialize()
-                log.info("PortAudio reset complete — retrying default device")
-                self.stream = sd.InputStream(
+                log.info("Opening audio stream...")
+                stream = sd.InputStream(
                     samplerate=SAMPLE_RATE, channels=CHANNELS,
                     dtype="float32", callback=callback,
                 )
-                self.stream.start()
-                log.info("Audio stream started after PortAudio reset")
-            except Exception as e2:
-                log.warning(f"Default device retry failed: {e2} — scanning for input devices")
-                self.stream = None
-                # Try each available input device
-                opened = False
+                log.info("Starting audio stream...")
+                stream.start()
+                log.info("Audio stream started successfully")
+            except Exception as e1:
+                log.warning(f"Default device failed: {e1} — trying PortAudio reset + fallback")
+                stream = None
+                # PortAudio can get into a stale state after sleep/wake,
+                # Bluetooth changes, or device switches.  Reset and retry.
                 try:
-                    devices = sd.query_devices()
-                    for idx, dev in enumerate(devices):
-                        if dev.get("max_input_channels", 0) >= 1:
-                            try:
-                                log.info(f"Trying device {idx}: {dev['name']}")
-                                self.stream = sd.InputStream(
-                                    device=idx,
-                                    samplerate=SAMPLE_RATE, channels=CHANNELS,
-                                    dtype="float32", callback=callback,
-                                )
-                                self.stream.start()
-                                log.info(f"Audio stream started on device {idx}: {dev['name']}")
-                                opened = True
-                                break
-                            except Exception as e3:
-                                log.debug(f"Device {idx} failed: {e3}")
-                                self.stream = None
-                except Exception as e_scan:
-                    log.error(f"Device scan failed: {e_scan}")
-
-                if not opened:
-                    log.error(f"All audio devices failed. Original error: {e1}")
-                    self.recording = False
-                    self.stream = None
+                    sd._terminate()
+                    sd._initialize()
+                    log.info("PortAudio reset complete — retrying default device")
+                    stream = sd.InputStream(
+                        samplerate=SAMPLE_RATE, channels=CHANNELS,
+                        dtype="float32", callback=callback,
+                    )
+                    stream.start()
+                    log.info("Audio stream started after PortAudio reset")
+                except Exception as e2:
+                    log.warning(f"Default device retry failed: {e2} — scanning for input devices")
+                    stream = None
+                    # Try each available input device
                     try:
-                        from PyObjCTools import AppHelper
-                        AppHelper.callAfter(self._hide_waveform)
-                        AppHelper.callAfter(self._restore_template_icon)
-                    except Exception:
-                        pass
-                    self._notify("myScriber", f"Mic error: {e1}")
-                    return
+                        devices = sd.query_devices()
+                        for idx, dev in enumerate(devices):
+                            if dev.get("max_input_channels", 0) >= 1:
+                                try:
+                                    log.info(f"Trying device {idx}: {dev['name']}")
+                                    stream = sd.InputStream(
+                                        device=idx,
+                                        samplerate=SAMPLE_RATE, channels=CHANNELS,
+                                        dtype="float32", callback=callback,
+                                    )
+                                    stream.start()
+                                    log.info(f"Audio stream started on device {idx}: {dev['name']}")
+                                    break
+                                except Exception as e3:
+                                    log.debug(f"Device {idx} failed: {e3}")
+                                    stream = None
+                    except Exception as e_scan:
+                        log.error(f"Device scan failed: {e_scan}")
+                    if stream is None:
+                        log.error(f"All audio devices failed. Original error: {e1}")
+
+            # Dispatch result back to main thread
+            try:
+                from PyObjCTools import AppHelper
+                AppHelper.callAfter(lambda: app._on_stream_ready(stream))
+            except Exception:
+                app._on_stream_ready(stream)
+
+        # Timeout watchdog — if the thread hasn't finished in STREAM_TIMEOUT
+        # seconds, give up so the app stays responsive.
+        def _stream_timeout():
+            if app.recording and app.stream is None:
+                log.error(f"Audio stream open timed out after {STREAM_TIMEOUT}s — aborting")
+                try:
+                    from PyObjCTools import AppHelper
+                    AppHelper.callAfter(lambda: app._on_stream_ready(None, timed_out=True))
+                except Exception:
+                    app._on_stream_ready(None, timed_out=True)
+
+        t = threading.Thread(target=_open_stream_thread, daemon=True, name="stream-open")
+        t.start()
+        timer = threading.Timer(STREAM_TIMEOUT, _stream_timeout)
+        timer.daemon = True
+        timer.start()
+
+    def _on_stream_ready(self, stream, timed_out=False):
+        """Called on the main thread when the background stream-open finishes.
+        May be called twice (once by the thread, once by the timeout timer)
+        so it must be idempotent."""
+        if timed_out:
+            # Only act if we're still waiting (no stream arrived yet)
+            if self.recording and self.stream is None:
+                self.recording = False
+                try:
+                    self._hide_waveform()
+                    self._restore_template_icon()
+                except Exception:
+                    pass
+                self._notify("myScriber", "Mic timed out — try again or check audio settings.")
+            return
+
+        if stream is not None:
+            # Stream opened successfully — but check we're still recording
+            # (user may have toggled off while we were opening)
+            if self.recording:
+                self.stream = stream
+                log.info("Audio stream attached — recording live")
+            else:
+                # User cancelled while stream was opening; close it
+                log.info("Recording cancelled during stream open — closing stream")
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+        else:
+            # All devices failed
+            if self.recording:
+                self.recording = False
+                try:
+                    self._hide_waveform()
+                    self._restore_template_icon()
+                except Exception:
+                    pass
+                self._notify("myScriber", "Mic error — no working audio device found.")
 
     def _stop_and_transcribe(self):
         if not self.recording:
